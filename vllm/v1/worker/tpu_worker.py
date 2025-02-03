@@ -4,8 +4,6 @@ from typing import Optional
 
 import torch
 import torch.distributed
-import torch_xla.core.xla_model as xm
-import torch_xla.runtime as xr
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -47,26 +45,16 @@ class TPUWorker(WorkerBase):
 
         # Device initialization should happen after initializing
         # the distributed runtime.
-        self.device = xm.xla_device()
+        self.device = torch.device("jax:0")
         self.device_config.device = self.device
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        xm.set_rng_state(self.model_config.seed, self.device)
+        # xm.set_rng_state(self.model_config.seed, self.device)
 
-        # Increase the cache size limit, which is the maximum number of
-        # dynamo graphs that can be compiled.
-        # NOTE(woosuk): Usually, we compile 10-15 graphs for prefill and
-        # 30-40 graphs for decode. 128 is an arbitrary safe number.
-        torch._dynamo.config.cache_size_limit = 128
+        # TODO(chengjiyao): set jax cache size limit
         # Use persistent cache to avoid XLA recompilation.
-        # NOTE(woosuk): Set per-rank cache path since different ranks
-        # can have slightly different XLA graphs.
-        world_size = self.parallel_config.world_size
-        rank = xr.global_ordinal()
-        per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                     f"tp{world_size}_rank{rank}")
-        xr.initialize_cache(per_rank_path, readonly=False)
+        # TODO(chengjiyao): do we need to set different cache for different rank
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
@@ -91,16 +79,15 @@ class TPUWorker(WorkerBase):
             num_tokens=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
             exec_mode=ExecutionMode.PREFILL,
+            sync=True,
         )
-
-        # Synchronize before measuring the memory usage.
-        xm.wait_device_ops()
+        
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
-        m = xm.get_memory_info(self.device)
-        total_memory_size = m["bytes_limit"]
-        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+        # TODO(chengjiyao): get memory info in jax
+        total_memory_size = 32 * 1024 ** 3 # 32GB
+        profiled = 24 * 1024 ** 3 # 24GB
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
@@ -130,6 +117,7 @@ def init_tpu_worker_distributed_environment(
     # the input objects on CPU. The all-reduce and all-gather ops on TPU
     # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
     # own context.
+    # TODO(chengjiyao): should we change the backend to jax?
     init_distributed_environment(
         world_size=parallel_config.world_size,
         rank=rank,
