@@ -35,6 +35,8 @@ except (ImportError, OSError):
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
         "SafetensorsStreamer")
 
+from vllm.distributed.utils import get_mesh, get_row_parallel_partition_spec, shard_spmd
+
 logger = init_logger(__name__)
 
 # use system-level temp directory for file locks, so that multiple users
@@ -544,7 +546,7 @@ def row_parallel_weight_loader(param: torch.Tensor,
     ret_o = default_weight_loader(param, loaded_weight)
 
     mesh = get_mesh()
-    shard_spmd(param.data, mesh, get_col_parallel_partition_spec())
+    shard_spmd(param.data, mesh, get_row_parallel_partition_spec())
 
     return ret_o
 
