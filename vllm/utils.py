@@ -55,6 +55,10 @@ from vllm.logger import enable_trace_function_call, init_logger
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+from tpu_info import device as tpu_info_device
+from tpu_info.cli import metrics
+
+
 logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
@@ -2206,3 +2210,10 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     else:
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
+
+def get_tpu_info(device = None):
+    tpu_info = metrics.get_chip_usage(tpu_info_device.get_local_chips()[0])
+    util = {f"bytes_limit": tpu.total_memory for tpu in (tpu_info if device is None else [tpu_info[device]])}
+    memory = {f"peak_bytes_used": tpu.memory_usage for tpu in (tpu_info if device is None else [tpu_info[device]])}
+    return util | memory
+    # return {f"TPU Utilization (%) / Device 0": 0} | {f"TPU Memory (%) / Device 0": 0}
