@@ -19,7 +19,6 @@ class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
     device_name: str = "tpu"
     device_type: str = "tpu"
-    dispatch_key: str = "XLA"
     ray_device_key: str = "TPU"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
 
@@ -72,9 +71,6 @@ class TpuPlatform(Platform):
         if compilation_config.level != CompilationLevel.DYNAMO_ONCE:
             logger.info("[TPU] Forcing DYNAMO_ONCE compilation level")
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
-
-        if compilation_config.backend == "":
-            compilation_config.backend = "openxla"
 
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"
