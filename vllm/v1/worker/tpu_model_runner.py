@@ -6,9 +6,9 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 import torch.nn as nn
-# TPU XLA related
-import torch_xla.core.xla_model as xm
-import torch_xla.runtime as xr
+# TorchAx related
+import torchax
+import jax
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -430,19 +430,16 @@ class TPUModelRunner(ModelRunnerBase):
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        xm_tp_rank = xr.global_ordinal()
+        # TODO(chengjiyao): verify this could work for both SPMD and mannual collective
+        tp_rank = jax.process_index()
         with patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
-                return_value=xm_tp_rank):
+                return_value=tp_rank):
             model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
-        xm.wait_device_ops()
         model = ModelWrapperV1(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model = torchax.compile(model)
 
     def dummy_run(
         self,
@@ -450,6 +447,7 @@ class TPUModelRunner(ModelRunnerBase):
         num_tokens: int,
         seq_len: Optional[int] = None,
         exec_mode: Optional[ExecutionMode] = None,
+        sync=False,
     ) -> None:
         assert seq_len is not None
         assert exec_mode is not None
@@ -531,30 +529,12 @@ class TPUModelRunner(ModelRunnerBase):
                 context_lens=context_lens,
             )
 
-        # NOTE(woosuk): There are two stages of compilation: torch.compile and
-        # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
-        # overhead by reusing the FX graph for different shapes.
-        # However, the XLA graph will still require static shapes and needs to
-        # be re-compiled for every different shapes. This overhead is inevitable
-        # in the first run, but can be skipped afterwards as we cache the XLA
-        # graphs in the disk (VLLM_XLA_CACHE_PATH).
-        if exec_mode.is_prefill():
-            # Prefll
-            torch._dynamo.mark_dynamic(token_ids, 1)
-            torch._dynamo.mark_dynamic(position_ids, 1)
-            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
-        else:
-            # Decode
-            torch._dynamo.mark_dynamic(token_ids, 0)
-            torch._dynamo.mark_dynamic(position_ids, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
-
         # TODO: Remove the attn_metadata above
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
-            self.model(token_ids, position_ids, None, kv_caches)
+            model_result = self.model(token_ids, position_ids, None, kv_caches)
+            if sync:
+                torchax.interop.call_jax(jax.block_until_ready, model_result)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -567,8 +547,7 @@ class TPUModelRunner(ModelRunnerBase):
             seq_len = 16
             while True:
                 self.dummy_run(self.kv_caches, batch_size, seq_len,
-                               ExecutionMode.PREFILL)
-                xm.wait_device_ops()
+                               ExecutionMode.PREFILL, sync=True)
                 logger.info("  -- batch_size: %d, seq_len: %d", batch_size,
                             seq_len)
 
@@ -592,8 +571,7 @@ class TPUModelRunner(ModelRunnerBase):
         batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
             self.dummy_run(self.kv_caches, batch_size, seq_len,
-                           ExecutionMode.DECODE)
-            xm.wait_device_ops()
+                           ExecutionMode.DECODE, sync=True)
             logger.info("  -- batch_size: %d, seq_len: %d, max_num_seqs = %d",
                         batch_size, seq_len,
                         self.scheduler_config.max_num_seqs)
