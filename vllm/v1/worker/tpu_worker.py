@@ -16,6 +16,9 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
 
+import torchax
+torchax.enable_globally()
+
 logger = init_logger(__name__)
 
 
@@ -31,6 +34,8 @@ class TPUWorker(WorkerBase):
     ):
         super().__init__(vllm_config, local_rank, rank,
                          distributed_init_method)
+        # import torchax
+        # torchax.default_env().config.print_after_each_op = True
 
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
