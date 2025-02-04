@@ -271,12 +271,12 @@ device_ids = None
 #     # return ('model', 'data')
 
 def get_col_parallel_partition_spec():
-    return ('axis', None)
-    # return (None, 'axis')
+    # return ('axis', None)
+    return (None, 'axis')
 
 def get_row_parallel_partition_spec():
-    return (None, 'axis')
-    # return ('axis', None)
+    # return (None, 'axis')
+    return ('axis', None)
 
 def shard_spmd(data, mesh, partition_spec, show_visual=False):
     assert isinstance(data, torch.Tensor), "Object is not an torch.Tensor"
