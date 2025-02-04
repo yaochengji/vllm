@@ -1,8 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
-# import torch_xla.experimental.custom_kernel  # Required to register custom ops.
+import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 import torchax
 from jax.experimental.pallas.ops.tpu import flash_attention
 from jax.experimental.pallas.ops.tpu.paged_attention.paged_attention_kernel import paged_attention
@@ -90,6 +90,31 @@ class PallasMetadata(AttentionMetadata):
         assert self.block_tables is not None
         assert self.context_lens is not None
         return self
+
+    def __getitem__(self, index):
+        try:
+            return getattr(self, fields(self)[index].name)
+        except IndexError:
+            raise IndexError("Index out of range")
+        except TypeError:
+            raise TypeError("Invalid index type.  Must be an integer.")
+
+    def __len__(self):
+        return len(fields(self))
+
+    def __iter__(self):
+        for field in fields(self):
+            yield getattr(self, field.name)
+
+    def __setitem__(self, key, value):
+        try:
+            setattr(self, fields(self)[key].name, value)
+        except IndexError:
+            raise IndexError("Index out of range")
+        except AttributeError:
+            raise TypeError("Invalid index type.  Must be an integer.")
+        except Exception as e:
+            raise e
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
