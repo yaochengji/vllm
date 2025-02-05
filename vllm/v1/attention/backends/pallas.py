@@ -15,6 +15,21 @@ from vllm.v1.attention.backends.pallas_multi_queries_paged_attention_kernel impo
     paged_attention as multi_queries_paged_attention
 
 
+DEFAULT_BLOCK_SIZES = {
+    "block_q": 512,
+    "block_k_major": 512,
+    "block_k": 512,
+    "block_b": 2,
+    "block_q_major_dkv": 512,
+    "block_k_major_dkv": 512,
+    "block_q_dkv": 512,
+    "block_k_dkv": 512,
+    "block_q_dq": 1024,
+    "block_k_dq": 256,
+    "block_k_major_dq": 512,
+}
+
+
 class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
@@ -254,12 +269,19 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 # [batch_size, num_heads, seq_len, d_model]
                 # while the input is [batch_size, seq_len, num_heads, d_model].
                 # Permute the input to match the required format.
+                block_sizes = flash_attention.BlockSizes(
+                    block_b = min(DEFAULT_BLOCK_SIZES["block_b"], query.shape[0]),
+                    block_q = min(DEFAULT_BLOCK_SIZES["block_q"], query.shape[1]),
+                    block_k_major = min(DEFAULT_BLOCK_SIZES["block_k_major"], key.shape[1]),
+                    block_k = min(DEFAULT_BLOCK_SIZES["block_k"], key.shape[1])
+                )
                 output = torchax.interop.call_jax(
                     flash_attention.flash_attention,
                     query.permute(0, 2, 1, 3),
                     key.permute(0, 2, 1, 3),
                     value.permute(0, 2, 1, 3),
-                    True,
+                    causal = True,
+                    block_sizes = block_sizes
                 )
                 output = output.permute(0, 2, 1, 3)
             else:
