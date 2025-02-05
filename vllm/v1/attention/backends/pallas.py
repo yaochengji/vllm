@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
@@ -50,7 +50,6 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> None:
         raise RuntimeError("swap_blocks is not used for the TPU backend.")
 
-    @torch.compile(backend="openxla")
     @staticmethod
     def copy_blocks(
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -58,9 +57,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> None:
         src_indices, dst_indices = src_to_dists
         for k_cache, v_cache in kv_caches:
-            # torch.ops.xla.dynamo_set_buffer_donor_(k_cache, True)
             k_cache[:, dst_indices] = k_cache[:, src_indices]
-            # torch.ops.xla.dynamo_set_buffer_donor_(v_cache, True)
             v_cache[:, dst_indices] = v_cache[:, src_indices]
 
 
@@ -91,6 +88,31 @@ class PallasMetadata(AttentionMetadata):
         assert self.block_tables is not None
         assert self.context_lens is not None
         return self
+
+    def __getitem__(self, index):
+        try:
+            return getattr(self, fields(self)[index].name)
+        except IndexError:
+            raise IndexError("Index out of range")
+        except TypeError:
+            raise TypeError("Invalid index type.  Must be an integer.")
+
+    def __len__(self):
+        return len(fields(self))
+
+    def __iter__(self):
+        for field in fields(self):
+            yield getattr(self, field.name)
+
+    def __setitem__(self, key, value):
+        try:
+            setattr(self, fields(self)[key].name, value)
+        except IndexError:
+            raise IndexError("Index out of range")
+        except AttributeError:
+            raise TypeError("Invalid index type.  Must be an integer.")
+        except Exception as e:
+            raise e
         
 def pallas_metadata_flatten(data: PallasMetadata):
     children = tuple(x for x in data)
@@ -321,9 +343,6 @@ def write_to_kv_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
-    torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
-
     key = key.flatten(0, 2)
     value = value.flatten(0, 2)
     key_cache = key_cache.flatten(0, 2)
