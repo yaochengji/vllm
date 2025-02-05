@@ -231,7 +231,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
-        # self.updated_kv_cache = None
+        self.updated_kv_cache = None
 
         if attn_metadata is None:
             if output is None:
@@ -252,7 +252,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             key_cache, value_cache = write_to_kv_cache(key, value, key_cache,
                                                        value_cache,
                                                        slot_mapping)
-            # self.updated_kv_cache = (key_cache, value_cache)
+            self.updated_kv_cache = (key_cache, value_cache)
 
         query = query * self.scale
         if attn_metadata.num_prefills > 0:

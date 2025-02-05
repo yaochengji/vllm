@@ -377,10 +377,11 @@ class TPUModelRunner(ModelRunnerBase):
             with set_forward_context(decode_data.attn_metadata,
                                      self.vllm_config):
                 assert self.model is not None
-                selected_token_ids = self.model_forward_and_update_kv_caches(decode_data.input_tokens,
+                selected_token_ids, updated_kv_cache = self.model(decode_data.input_tokens,
                                                 decode_data.input_positions,
                                                 decode_data.attn_metadata,
                                                 self.kv_caches)
+                self.kv_caches = updated_kv_cache
 
             # Transfer sampled tokens from TPU to CPU
             selected_token_ids_list = selected_token_ids.cpu().tolist()
@@ -411,8 +412,9 @@ class TPUModelRunner(ModelRunnerBase):
             # Forward
             with set_forward_context(attn_metadata, self.vllm_config):
                 assert self.model is not None
-                selected_token_ids = self.model_forward_and_update_kv_caches(input_tokens, input_positions,
+                selected_token_ids, updated_kv_caches = self.model(input_tokens, input_positions,
                                                 attn_metadata, self.kv_caches)
+                self.kv_caches = updated_kv_caches
 
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -465,15 +467,6 @@ class TPUModelRunner(ModelRunnerBase):
         self.model_wrapper = ModelWrapperV1(model, self)
         # self.model = self.model_wrapper
         self.model = torchax.compile(self.model_wrapper)
-
-    def model_forward_and_update_kv_caches(self,
-            token_ids: torch.Tensor,
-            position_ids: torch.Tensor,
-            attn_metadata: AttentionMetadata,
-            kv_caches: List[Tuple[torch.Tensor, torch.Tensor]]):
-        res = self.model(token_ids, position_ids, attn_metadata, kv_caches)
-        self.model_wrapper.updated_kv_cache()
-        return res
 
     def dummy_run(
         self,
@@ -566,7 +559,7 @@ class TPUModelRunner(ModelRunnerBase):
         # TODO: Remove the attn_metadata above
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
-            model_result = self.model_forward_and_update_kv_caches(token_ids, position_ids, None, kv_caches)
+            model_result = self.model(token_ids, position_ids, None, kv_caches)
             if sync:
                 torchax.interop.call_jax(jax.block_until_ready, model_result)
 
@@ -720,9 +713,11 @@ class ModelWrapperV1(nn.Module):
         # Greedy sampling.
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
         argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
-        return argmax_token_ids
+        updated_kv_cache = self._get_updated_kv_cache()
+        updated_kv_cache = kv_caches if updated_kv_cache is None else updated_kv_cache
+        return argmax_token_ids, updated_kv_cache
 
-    def updated_kv_cache(self):
+    def _get_updated_kv_cache(self):
         updated_kv_caches = []
         for _, submodule in get_all_submodules(self.model):
             if isinstance(submodule, Attention):
@@ -730,7 +725,7 @@ class ModelWrapperV1(nn.Module):
                     updated_kv_caches.append(submodule.impl.updated_kv_cache)
                 else:
                     return
-        self.runner.kv_caches = updated_kv_caches
+        return updated_kv_caches
     
 
 def _get_padded_prefill_len(x: int) -> int:
