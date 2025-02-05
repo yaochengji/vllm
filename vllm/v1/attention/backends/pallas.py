@@ -369,6 +369,7 @@ def write_to_kv_cache(
     value = value.flatten(0, 2)
     key_cache = key_cache.flatten(0, 2)
     value_cache = value_cache.flatten(0, 2)
+    slot_mapping = slot_mapping.flatten()
     key_cache.index_copy_(0, slot_mapping, key)
     value_cache.index_copy_(0, slot_mapping, value)
 
