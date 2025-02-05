@@ -10,12 +10,13 @@ import torch.nn as nn
 import torchax
 import jax
 
-from vllm.attention import AttentionMetadata
+from vllm.attention import AttentionMetadata, Attention
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
+                                               PallasAttentionBackendImpl,
                                                PallasMetadata)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
@@ -36,6 +37,29 @@ _ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
 # This can significantly affect the performance if too large.
 _MAX_NUM_SAMPLES = 128
+
+def get_all_submodules(module: nn.Module, prefix: str = "", memo=None):
+    """
+    Recursively iterates through a PyTorch nn.Module and yields all its submodules.
+
+    Args:
+        module: The PyTorch module to iterate through.
+        prefix: (str, optional) A prefix for the module name (used in recursion).  Defaults to "".
+        memo: (set, optional) A set to keep track of visited modules to handle shared modules correctly.
+    """
+    if memo is None:
+        memo = set()
+
+    if id(module) in memo:
+        return
+    memo.add(id(module))
+
+    for name, child in module.named_children():
+        full_name = f"{prefix}{name}" if prefix else name
+        yield full_name, child  # Yield the current child
+        yield from get_all_submodules(
+            child, full_name + ".", memo
+        )  # Recursively call on the child
 
 
 @dataclass
@@ -353,7 +377,7 @@ class TPUModelRunner(ModelRunnerBase):
             with set_forward_context(decode_data.attn_metadata,
                                      self.vllm_config):
                 assert self.model is not None
-                selected_token_ids = self.model(decode_data.input_tokens,
+                selected_token_ids = self.model_forward_and_update_kv_caches(decode_data.input_tokens,
                                                 decode_data.input_positions,
                                                 decode_data.attn_metadata,
                                                 self.kv_caches)
@@ -387,7 +411,7 @@ class TPUModelRunner(ModelRunnerBase):
             # Forward
             with set_forward_context(attn_metadata, self.vllm_config):
                 assert self.model is not None
-                selected_token_ids = self.model(input_tokens, input_positions,
+                selected_token_ids = self.model_forward_and_update_kv_caches(input_tokens, input_positions,
                                                 attn_metadata, self.kv_caches)
 
             seq_len = (req_state.num_computed_tokens +
@@ -438,9 +462,18 @@ class TPUModelRunner(ModelRunnerBase):
                 return_value=tp_rank):
             model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
-        model = ModelWrapperV1(model)
-        # self.model = model
-        self.model = torchax.compile(model)
+        self.model_wrapper = ModelWrapperV1(model, self)
+        # self.model = self.model_wrapper
+        self.model = torchax.compile(self.model_wrapper)
+
+    def model_forward_and_update_kv_caches(self,
+            token_ids: torch.Tensor,
+            position_ids: torch.Tensor,
+            attn_metadata: AttentionMetadata,
+            kv_caches: List[Tuple[torch.Tensor, torch.Tensor]]):
+        res = self.model(token_ids, position_ids, attn_metadata, kv_caches)
+        self.model_wrapper.updated_kv_cache()
+        return res
 
     def dummy_run(
         self,
@@ -533,7 +566,7 @@ class TPUModelRunner(ModelRunnerBase):
         # TODO: Remove the attn_metadata above
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
-            model_result = self.model(token_ids, position_ids, None, kv_caches)
+            model_result = self.model_forward_and_update_kv_caches(token_ids, position_ids, None, kv_caches)
             if sync:
                 torchax.interop.call_jax(jax.block_until_ready, model_result)
 
@@ -627,9 +660,10 @@ class TPUModelRunner(ModelRunnerBase):
 
 class ModelWrapperV1(nn.Module):
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, runner: TPUModelRunner):
         super().__init__()
         self.model = model
+        self.runner = runner
 
     def forward(
         self,
@@ -688,6 +722,16 @@ class ModelWrapperV1(nn.Module):
         argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
         return argmax_token_ids
 
+    def updated_kv_cache(self):
+        updated_kv_caches = []
+        for _, submodule in get_all_submodules(self.model):
+            if isinstance(submodule, Attention):
+                if submodule.impl.updated_kv_cache is not None:
+                    updated_kv_caches.append(submodule.impl.updated_kv_cache)
+                else:
+                    return
+        self.runner.kv_caches = updated_kv_caches
+    
 
 def _get_padded_prefill_len(x: int) -> int:
     # NOTE(woosuk): The pallas FlashAttention kernel requires the sequence

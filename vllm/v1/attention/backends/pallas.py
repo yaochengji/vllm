@@ -65,6 +65,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> None:
         raise RuntimeError("swap_blocks is not used for the TPU backend.")
 
+    # TODO(chengjiyao): torchax doesn't support inplace assignment
     @staticmethod
     def copy_blocks(
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -163,6 +164,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.updated_kv_cache = None
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -229,6 +231,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
+        # self.updated_kv_cache = None
 
         if attn_metadata is None:
             if output is None:
@@ -245,7 +248,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache[0].numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
-            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
+            # TODO(chengjiyao): set buffer donor
+            key_cache, value_cache = write_to_kv_cache(key, value, key_cache,
+                                                       value_cache,
+                                                       slot_mapping)
+            # self.updated_kv_cache = (key_cache, value_cache)
 
         query = query * self.scale
         if attn_metadata.num_prefills > 0:
@@ -367,11 +374,14 @@ def write_to_kv_cache(
 ) -> None:
     key = key.flatten(0, 2)
     value = value.flatten(0, 2)
+    key_cache_shape = key_cache.shape
+    value_cache_shape = value_cache.shape
     key_cache = key_cache.flatten(0, 2)
     value_cache = value_cache.flatten(0, 2)
     slot_mapping = slot_mapping.flatten()
-    key_cache.index_copy_(0, slot_mapping, key)
-    value_cache.index_copy_(0, slot_mapping, value)
+    key_cache = key_cache.index_copy(0, slot_mapping, key)
+    value_cache = value_cache.index_copy(0, slot_mapping, value)
+    return key_cache.reshape(key_cache_shape), value_cache.reshape(value_cache_shape)
 
 
 def paged_attention(
