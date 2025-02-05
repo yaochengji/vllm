@@ -5,7 +5,6 @@ import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 import torchax
 from jax.experimental.pallas.ops.tpu import flash_attention
-from jax.experimental.pallas.ops.tpu.paged_attention.paged_attention_kernel import paged_attention
 import jax
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
@@ -389,7 +388,7 @@ def paged_attention(
         megacore_mode = megacore_mode
 
     output = torchax.interop.call_jax(
-        paged_attention,
+        multi_queries_paged_attention,
         query,
         key_cache,
         value_cache,
