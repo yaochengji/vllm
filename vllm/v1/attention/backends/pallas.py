@@ -10,6 +10,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from jax.experimental.pallas.ops.tpu.paged_attention.paged_attention_kernel import paged_attention as jax_paged_attention
 from vllm.v1.attention.backends.pallas_multi_queries_paged_attention_kernel import \
     paged_attention as multi_queries_paged_attention
 
@@ -388,13 +389,13 @@ def paged_attention(
         megacore_mode = megacore_mode
 
     output = torchax.interop.call_jax(
-        multi_queries_paged_attention,
+        jax_paged_attention,
         query,
         key_cache,
         value_cache,
         context_lens,
         block_tables,
-        pages_per_compute_block,
+        pages_per_compute_block=pages_per_compute_block,
         megacore_mode=megacore_mode,
     )
     return output
