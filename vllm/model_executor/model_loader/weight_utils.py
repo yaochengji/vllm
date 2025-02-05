@@ -413,8 +413,11 @@ def safetensors_weights_iterator(
             bar_format=_BAR_FORMAT,
     ):
         with safe_open(st_file, framework="pt") as f:
-            for name in f.keys():  # noqa: SIM118
+            for name in f.keys():  # noqa: SIM118'
+                import torchax
+                torchax.disable_globally()
                 param = f.get_tensor(name)
+                torchax.enable_globally()
                 yield name, param
 
 
