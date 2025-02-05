@@ -439,7 +439,8 @@ class TPUModelRunner(ModelRunnerBase):
             model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
         model = ModelWrapperV1(model)
-        self.model = torchax.compile(model)
+        self.model = model
+        # self.model = torchax.compile(model)
 
     def dummy_run(
         self,
