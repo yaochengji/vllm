@@ -35,6 +35,8 @@ class TPUWorker(WorkerBase):
     ):
         super().__init__(vllm_config, local_rank, rank,
                          distributed_init_method)
+        # TOOD(chengjiyao): clean the monkey patch
+        torch._sync = lambda *args, **kwargs: None
 
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
