@@ -395,8 +395,8 @@ class VocabParallelEmbedding(torch.nn.Module):
             ])
             param.data.copy_(padded_weight)
         else:
-            param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
-            param[loaded_weight.shape[0]:].data.fill_(0)
+            param[:loaded_weight.shape[0]] = loaded_weight.to("jax")
+            param[loaded_weight.shape[0]:] = 0
 
     def forward(self, input_):
         if self.tp_size > 1:

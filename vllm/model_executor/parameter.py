@@ -264,9 +264,8 @@ class PerTensorScaleParameter(BasevLLMParameter):
             assert loaded_weight.shape[0] == 1
             loaded_weight = loaded_weight[0]
 
-        param_data = param_data[shard_id]
+        param_data[shard_id] = loaded_weight.to("jax")
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
 
 
 class PackedColumnParameter(_ColumnvLLMParameter):
