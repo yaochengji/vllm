@@ -374,14 +374,19 @@ class TPUModelRunner(ModelRunnerBase):
         # Run decodes (a single batch)
         if len(decode_data.req_ids) > 0:
             # Forward
+            print("decode_data.attn_metadata.slot_mapping: ", decode_data.attn_metadata.slot_mapping)
             with set_forward_context(decode_data.attn_metadata,
                                      self.vllm_config):
                 assert self.model is not None
-                selected_token_ids, updated_kv_cache = self.model(decode_data.input_tokens,
+                selected_token_ids, updated_kv_caches = self.model(decode_data.input_tokens,
                                                 decode_data.input_positions,
                                                 decode_data.attn_metadata,
                                                 self.kv_caches)
-                self.kv_caches = updated_kv_cache
+                # print("decoding updated_kv_caches: ", updated_kv_caches[0][0].to(torch.float32).sum())
+                self.kv_caches = updated_kv_caches
+                print("decoding updated_kv_caches: ", self.kv_caches[0][0][0][0][:, 0])
+                for cache_idx, cache_name in enumerate(self.vllm_config.compilation_config.static_forward_context.keys()):
+                    self.vllm_config.compilation_config.static_forward_context[cache_name].kv_cache = [updated_kv_caches[cache_idx]]
 
             # Transfer sampled tokens from TPU to CPU
             selected_token_ids_list = selected_token_ids.cpu().tolist()
@@ -415,6 +420,9 @@ class TPUModelRunner(ModelRunnerBase):
                 selected_token_ids, updated_kv_caches = self.model(input_tokens, input_positions,
                                                 attn_metadata, self.kv_caches)
                 self.kv_caches = updated_kv_caches
+                print("prompt updated_kv_caches: ", self.kv_caches[0][0][0][0][:, 0])
+                for cache_idx, cache_name in enumerate(self.vllm_config.compilation_config.static_forward_context.keys()):
+                    self.vllm_config.compilation_config.static_forward_context[cache_name].kv_cache = [updated_kv_caches[cache_idx]]
 
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -563,55 +571,6 @@ class TPUModelRunner(ModelRunnerBase):
             if sync:
                 torchax.interop.call_jax(jax.block_until_ready, model_result)
 
-    def capture_model(self) -> None:
-        """Compile the model."""
-
-        logger.info("Compiling the model with different input shapes.")
-
-        # Capture prefill shapes
-        start = time.perf_counter()
-        for batch_size in [1]:
-            seq_len = 16
-            while True:
-                self.dummy_run(self.kv_caches, batch_size, seq_len,
-                               ExecutionMode.PREFILL, sync=True)
-                logger.info("  -- batch_size: %d, seq_len: %d", batch_size,
-                            seq_len)
-
-                if seq_len >= self.model_config.max_model_len:
-                    break
-
-                num_tokens = batch_size * seq_len
-                if num_tokens >= self.scheduler_config.max_num_batched_tokens:
-                    break
-
-                # Move to next seq_len
-                seq_len = seq_len * 2
-
-        end = time.perf_counter()
-        logger.info("Compilation for prefill shapes is done in %.2f [secs].",
-                    end - start)
-
-        # Capture decode shapes.
-        start = time.time()
-        seq_len = 1
-        batch_size = 8  # Must be in sync with _get_padded_batch_size()
-        while True:
-            self.dummy_run(self.kv_caches, batch_size, seq_len,
-                           ExecutionMode.DECODE, sync=True)
-            logger.info("  -- batch_size: %d, seq_len: %d, max_num_seqs = %d",
-                        batch_size, seq_len,
-                        self.scheduler_config.max_num_seqs)
-
-            if batch_size >= self.scheduler_config.max_num_seqs:
-                break
-
-            batch_size = batch_size + 16 if batch_size >= 16 else batch_size * 2
-
-        end = time.time()
-        logger.info("Compilation for decode shapes is done in %.2f [secs].",
-                    end - start)
-
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -679,25 +638,25 @@ class ModelWrapperV1(nn.Module):
                 memory profiling at initialization.
         """
         # Skip this in memory profiling at initialization.
-        if attn_metadata is not None:
-            # index_copy_(slot_mapping) only works when the inserted dimension
-            # is 0. However, the KV cache in the Pallas backend has the shape
-            # [num_kv_heads, num_blocks, block_size, head_size]. To make it
-            # work, we need to flatten the first three dimensions and modify
-            # the slot_mapping accordingly.
-            num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
-            slot_mapping = attn_metadata.slot_mapping
-            slot_mapping = slot_mapping.flatten()
-            head_indicies = torch.arange(0,
-                                         num_kv_heads,
-                                         device=slot_mapping.device,
-                                         dtype=slot_mapping.dtype)
-            head_indicies *= block_size * num_blocks
-            slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
-                -1, num_kv_heads)
-            slot_mapping = slot_mapping + head_indicies.view(1, -1)
-            slot_mapping = slot_mapping.flatten()
-            attn_metadata.slot_mapping = slot_mapping
+        # index_copy_(slot_mapping) only works when the inserted dimension
+        # is 0. However, the KV cache in the Pallas backend has the shape
+        # [num_kv_heads, num_blocks, block_size, head_size]. To make it
+        # work, we need to flatten the first three dimensions and modify
+        # the slot_mapping accordingly.
+        num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
+        slot_mapping = attn_metadata.slot_mapping
+        slot_mapping = slot_mapping.flatten()
+        head_indicies = torch.arange(0,
+                                        num_kv_heads,
+                                        device=slot_mapping.device,
+                                        dtype=slot_mapping.dtype)
+        head_indicies *= block_size * num_blocks
+        slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
+            -1, num_kv_heads)
+        slot_mapping = slot_mapping + head_indicies.view(1, -1)
+        slot_mapping = slot_mapping.flatten()
+        attn_metadata.slot_mapping = slot_mapping
+        print("attn_metadata.slot_mapping.shape: ", attn_metadata.slot_mapping.shape)
 
         assert self.model is not None
         hidden_states = self.model(

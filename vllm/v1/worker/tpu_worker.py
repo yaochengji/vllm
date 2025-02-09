@@ -80,13 +80,13 @@ class TPUWorker(WorkerBase):
                                    device=self.device))
                      for _ in range(num_layers)]
 
-        self.model_runner.dummy_run(
-            kv_caches,
-            num_tokens=1,
-            seq_len=self.scheduler_config.max_num_batched_tokens,
-            exec_mode=ExecutionMode.PREFILL,
-            sync=True,
-        )
+        # self.model_runner.dummy_run(
+        #     kv_caches,
+        #     num_tokens=1,
+        #     seq_len=self.scheduler_config.max_num_batched_tokens,
+        #     exec_mode=ExecutionMode.PREFILL,
+        #     sync=True,
+        # )
         
 
         # Get the maximum amount of memory used by the model weights and
