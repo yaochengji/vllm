@@ -6,16 +6,17 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 import torch.nn as nn
-# TPU XLA related
-import torch_xla.core.xla_model as xm
-import torch_xla.runtime as xr
+# TorchAx related
+import torchax
+import jax
 
-from vllm.attention import AttentionMetadata
+from vllm.attention import AttentionMetadata, Attention
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
+                                               PallasAttentionBackendImpl,
                                                PallasMetadata)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
@@ -36,6 +37,29 @@ _ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
 # This can significantly affect the performance if too large.
 _MAX_NUM_SAMPLES = 128
+
+def get_all_submodules(module: nn.Module, prefix: str = "", memo=None):
+    """
+    Recursively iterates through a PyTorch nn.Module and yields all its submodules.
+
+    Args:
+        module: The PyTorch module to iterate through.
+        prefix: (str, optional) A prefix for the module name (used in recursion).  Defaults to "".
+        memo: (set, optional) A set to keep track of visited modules to handle shared modules correctly.
+    """
+    if memo is None:
+        memo = set()
+
+    if id(module) in memo:
+        return
+    memo.add(id(module))
+
+    for name, child in module.named_children():
+        full_name = f"{prefix}{name}" if prefix else name
+        yield full_name, child  # Yield the current child
+        yield from get_all_submodules(
+            child, full_name + ".", memo
+        )  # Recursively call on the child
 
 
 @dataclass
@@ -350,13 +374,19 @@ class TPUModelRunner(ModelRunnerBase):
         # Run decodes (a single batch)
         if len(decode_data.req_ids) > 0:
             # Forward
+            print("decode_data.attn_metadata.slot_mapping: ", decode_data.attn_metadata.slot_mapping)
             with set_forward_context(decode_data.attn_metadata,
                                      self.vllm_config):
                 assert self.model is not None
-                selected_token_ids = self.model(decode_data.input_tokens,
+                selected_token_ids, updated_kv_caches = self.model(decode_data.input_tokens,
                                                 decode_data.input_positions,
                                                 decode_data.attn_metadata,
                                                 self.kv_caches)
+                # print("decoding updated_kv_caches: ", updated_kv_caches[0][0].to(torch.float32).sum())
+                self.kv_caches = updated_kv_caches
+                print("decoding updated_kv_caches: ", self.kv_caches[0][0][0][0][:, 0])
+                for cache_idx, cache_name in enumerate(self.vllm_config.compilation_config.static_forward_context.keys()):
+                    self.vllm_config.compilation_config.static_forward_context[cache_name].kv_cache = [updated_kv_caches[cache_idx]]
 
             # Transfer sampled tokens from TPU to CPU
             selected_token_ids_list = selected_token_ids.cpu().tolist()
@@ -387,8 +417,12 @@ class TPUModelRunner(ModelRunnerBase):
             # Forward
             with set_forward_context(attn_metadata, self.vllm_config):
                 assert self.model is not None
-                selected_token_ids = self.model(input_tokens, input_positions,
+                selected_token_ids, updated_kv_caches = self.model(input_tokens, input_positions,
                                                 attn_metadata, self.kv_caches)
+                self.kv_caches = updated_kv_caches
+                print("prompt updated_kv_caches: ", self.kv_caches[0][0][0][0][:, 0])
+                for cache_idx, cache_name in enumerate(self.vllm_config.compilation_config.static_forward_context.keys()):
+                    self.vllm_config.compilation_config.static_forward_context[cache_name].kv_cache = [updated_kv_caches[cache_idx]]
 
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -430,19 +464,17 @@ class TPUModelRunner(ModelRunnerBase):
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        xm_tp_rank = xr.global_ordinal()
+        # TODO(chengjiyao): verify this could work for both SPMD and mannual collective
+        tp_rank = jax.process_index()
         with patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
-                return_value=xm_tp_rank):
+                return_value=tp_rank):
             model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
-        xm.wait_device_ops()
-        model = ModelWrapperV1(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model_wrapper = ModelWrapperV1(model, self)
+        # self.model = self.model_wrapper
+        self.model = torchax.compile(self.model_wrapper)
 
     def dummy_run(
         self,
@@ -450,6 +482,7 @@ class TPUModelRunner(ModelRunnerBase):
         num_tokens: int,
         seq_len: Optional[int] = None,
         exec_mode: Optional[ExecutionMode] = None,
+        sync=False,
     ) -> None:
         assert seq_len is not None
         assert exec_mode is not None
@@ -531,81 +564,12 @@ class TPUModelRunner(ModelRunnerBase):
                 context_lens=context_lens,
             )
 
-        # NOTE(woosuk): There are two stages of compilation: torch.compile and
-        # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
-        # overhead by reusing the FX graph for different shapes.
-        # However, the XLA graph will still require static shapes and needs to
-        # be re-compiled for every different shapes. This overhead is inevitable
-        # in the first run, but can be skipped afterwards as we cache the XLA
-        # graphs in the disk (VLLM_XLA_CACHE_PATH).
-        if exec_mode.is_prefill():
-            # Prefll
-            torch._dynamo.mark_dynamic(token_ids, 1)
-            torch._dynamo.mark_dynamic(position_ids, 1)
-            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
-        else:
-            # Decode
-            torch._dynamo.mark_dynamic(token_ids, 0)
-            torch._dynamo.mark_dynamic(position_ids, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
-
         # TODO: Remove the attn_metadata above
         with set_forward_context(None, self.vllm_config):
             assert self.model is not None
-            self.model(token_ids, position_ids, None, kv_caches)
-
-    def capture_model(self) -> None:
-        """Compile the model."""
-
-        logger.info("Compiling the model with different input shapes.")
-
-        # Capture prefill shapes
-        start = time.perf_counter()
-        for batch_size in [1]:
-            seq_len = 16
-            while True:
-                self.dummy_run(self.kv_caches, batch_size, seq_len,
-                               ExecutionMode.PREFILL)
-                xm.wait_device_ops()
-                logger.info("  -- batch_size: %d, seq_len: %d", batch_size,
-                            seq_len)
-
-                if seq_len >= self.model_config.max_model_len:
-                    break
-
-                num_tokens = batch_size * seq_len
-                if num_tokens >= self.scheduler_config.max_num_batched_tokens:
-                    break
-
-                # Move to next seq_len
-                seq_len = seq_len * 2
-
-        end = time.perf_counter()
-        logger.info("Compilation for prefill shapes is done in %.2f [secs].",
-                    end - start)
-
-        # Capture decode shapes.
-        start = time.time()
-        seq_len = 1
-        batch_size = 8  # Must be in sync with _get_padded_batch_size()
-        while True:
-            self.dummy_run(self.kv_caches, batch_size, seq_len,
-                           ExecutionMode.DECODE)
-            xm.wait_device_ops()
-            logger.info("  -- batch_size: %d, seq_len: %d, max_num_seqs = %d",
-                        batch_size, seq_len,
-                        self.scheduler_config.max_num_seqs)
-
-            if batch_size >= self.scheduler_config.max_num_seqs:
-                break
-
-            batch_size = batch_size + 16 if batch_size >= 16 else batch_size * 2
-
-        end = time.time()
-        logger.info("Compilation for decode shapes is done in %.2f [secs].",
-                    end - start)
+            model_result = self.model(token_ids, position_ids, None, kv_caches)
+            if sync:
+                torchax.interop.call_jax(jax.block_until_ready, model_result)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -648,9 +612,10 @@ class TPUModelRunner(ModelRunnerBase):
 
 class ModelWrapperV1(nn.Module):
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, runner: TPUModelRunner):
         super().__init__()
         self.model = model
+        self.runner = runner
 
     def forward(
         self,
@@ -673,25 +638,25 @@ class ModelWrapperV1(nn.Module):
                 memory profiling at initialization.
         """
         # Skip this in memory profiling at initialization.
-        if attn_metadata is not None:
-            # index_copy_(slot_mapping) only works when the inserted dimension
-            # is 0. However, the KV cache in the Pallas backend has the shape
-            # [num_kv_heads, num_blocks, block_size, head_size]. To make it
-            # work, we need to flatten the first three dimensions and modify
-            # the slot_mapping accordingly.
-            num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
-            slot_mapping = attn_metadata.slot_mapping
-            slot_mapping = slot_mapping.flatten()
-            head_indicies = torch.arange(0,
-                                         num_kv_heads,
-                                         device=slot_mapping.device,
-                                         dtype=slot_mapping.dtype)
-            head_indicies *= block_size * num_blocks
-            slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
-                -1, num_kv_heads)
-            slot_mapping = slot_mapping + head_indicies.view(1, -1)
-            slot_mapping = slot_mapping.flatten()
-            attn_metadata.slot_mapping = slot_mapping
+        # index_copy_(slot_mapping) only works when the inserted dimension
+        # is 0. However, the KV cache in the Pallas backend has the shape
+        # [num_kv_heads, num_blocks, block_size, head_size]. To make it
+        # work, we need to flatten the first three dimensions and modify
+        # the slot_mapping accordingly.
+        num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
+        slot_mapping = attn_metadata.slot_mapping
+        slot_mapping = slot_mapping.flatten()
+        head_indicies = torch.arange(0,
+                                        num_kv_heads,
+                                        device=slot_mapping.device,
+                                        dtype=slot_mapping.dtype)
+        head_indicies *= block_size * num_blocks
+        slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
+            -1, num_kv_heads)
+        slot_mapping = slot_mapping + head_indicies.view(1, -1)
+        slot_mapping = slot_mapping.flatten()
+        attn_metadata.slot_mapping = slot_mapping
+        print("attn_metadata.slot_mapping.shape: ", attn_metadata.slot_mapping.shape)
 
         assert self.model is not None
         hidden_states = self.model(
@@ -707,8 +672,20 @@ class ModelWrapperV1(nn.Module):
         # Greedy sampling.
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
         argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
-        return argmax_token_ids
+        updated_kv_cache = self._get_updated_kv_cache()
+        updated_kv_cache = kv_caches if updated_kv_cache is None else updated_kv_cache
+        return argmax_token_ids, updated_kv_cache
 
+    def _get_updated_kv_cache(self):
+        updated_kv_caches = []
+        for _, submodule in get_all_submodules(self.model):
+            if isinstance(submodule, Attention):
+                if submodule.impl.updated_kv_cache is not None:
+                    updated_kv_caches.append(submodule.impl.updated_kv_cache)
+                else:
+                    return
+        return updated_kv_caches
+    
 
 def _get_padded_prefill_len(x: int) -> int:
     # NOTE(woosuk): The pallas FlashAttention kernel requires the sequence

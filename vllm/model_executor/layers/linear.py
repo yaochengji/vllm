@@ -558,8 +558,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
 
-            param_data = param_data.narrow(output_dim, shard_offset,
-                                           shard_size)
+            # param_data = param_data.narrow(output_dim, shard_offset,
+            #                                shard_size)
             start_idx = tp_rank * shard_size
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
@@ -584,8 +584,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
 
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        param_data[shard_offset: shard_offset + shard_size] = loaded_weight.to("jax")
+        # assert param_data.shape == loaded_weight.shape
 
     def _load_fused_module_from_checkpoint(self, param: BasevLLMParameter,
                                            loaded_weight: torch.Tensor):
@@ -859,7 +859,6 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         # Special case for per-tensor scales in fused case.
         needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
-
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv).
             # (e.g., Phi-3's qkv_proj).
@@ -966,8 +965,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
                     param, orig_qkv_offsets, loaded_shard_id)
 
-            param_data = param_data.narrow(output_dim, shard_offset,
-                                           shard_size)
             if loaded_shard_id == "q":
                 shard_id = tp_rank
             else:
@@ -996,9 +993,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "Loading a weight without `output_dim` attribute in "
                     "QKVParallelLinear, assume the weight is the same "
                     "for all partitions.")
-
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        param_data[shard_offset: shard_offset + shard_size] = loaded_weight.to("jax")
 
 
 class RowParallelLinear(LinearBase):

@@ -1,13 +1,33 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
-
+import torchax
+from jax.experimental.pallas.ops.tpu import flash_attention
+import jax
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from jax.experimental.pallas.ops.tpu.paged_attention.paged_attention_kernel import paged_attention as jax_paged_attention
+from vllm.v1.attention.backends.pallas_multi_queries_paged_attention_kernel import \
+    paged_attention as multi_queries_paged_attention
+
+
+DEFAULT_BLOCK_SIZES = {
+    "block_q": 512,
+    "block_k_major": 512,
+    "block_k": 512,
+    "block_b": 2,
+    "block_q_major_dkv": 512,
+    "block_k_major_dkv": 512,
+    "block_q_dkv": 512,
+    "block_k_dkv": 512,
+    "block_q_dq": 1024,
+    "block_k_dq": 256,
+    "block_k_major_dq": 512,
+}
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -45,7 +65,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> None:
         raise RuntimeError("swap_blocks is not used for the TPU backend.")
 
-    @torch.compile(backend="openxla")
+    # TODO(chengjiyao): torchax doesn't support inplace assignment
     @staticmethod
     def copy_blocks(
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -53,9 +73,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> None:
         src_indices, dst_indices = src_to_dists
         for k_cache, v_cache in kv_caches:
-            torch.ops.xla.dynamo_set_buffer_donor_(k_cache, True)
             k_cache[:, dst_indices] = k_cache[:, src_indices]
-            torch.ops.xla.dynamo_set_buffer_donor_(v_cache, True)
             v_cache[:, dst_indices] = v_cache[:, src_indices]
 
 
@@ -87,6 +105,45 @@ class PallasMetadata(AttentionMetadata):
         assert self.context_lens is not None
         return self
 
+    def __getitem__(self, index):
+        try:
+            return getattr(self, fields(self)[index].name)
+        except IndexError:
+            raise IndexError("Index out of range")
+        except TypeError:
+            raise TypeError("Invalid index type.  Must be an integer.")
+
+    def __len__(self):
+        return len(fields(self))
+
+    def __iter__(self):
+        for field in fields(self):
+            yield getattr(self, field.name)
+
+    def __setitem__(self, key, value):
+        try:
+            setattr(self, fields(self)[key].name, value)
+        except IndexError:
+            raise IndexError("Index out of range")
+        except AttributeError:
+            raise TypeError("Invalid index type.  Must be an integer.")
+        except Exception as e:
+            raise e
+        
+def pallas_metadata_flatten(data: PallasMetadata):
+    children = tuple(x for x in data)
+    aux_data = tuple()
+    return children, aux_data
+
+def pallas_metadata_unflatten(_, children):
+    return PallasMetadata(*children)
+
+jax.tree_util.register_pytree_node(
+    PallasMetadata,
+    pallas_metadata_flatten,
+    pallas_metadata_unflatten
+)
+
 
 class PallasAttentionBackendImpl(AttentionImpl):
 
@@ -107,6 +164,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.updated_kv_cache = None
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -173,6 +231,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
+        self.updated_kv_cache = None
 
         if attn_metadata is None:
             if output is None:
@@ -189,7 +248,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache[0].numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
-            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
+            # TODO(chengjiyao): set buffer donor
+            key_cache, value_cache = write_to_kv_cache(key, value, key_cache,
+                                                       value_cache,
+                                                       slot_mapping)
+            self.updated_kv_cache = (key_cache, value_cache)
 
         query = query * self.scale
         if attn_metadata.num_prefills > 0:
@@ -213,11 +276,19 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 # [batch_size, num_heads, seq_len, d_model]
                 # while the input is [batch_size, seq_len, num_heads, d_model].
                 # Permute the input to match the required format.
-                output = torch.ops.xla.flash_attention(
+                block_sizes = flash_attention.BlockSizes(
+                    block_b = min(DEFAULT_BLOCK_SIZES["block_b"], query.shape[0]),
+                    block_q = min(DEFAULT_BLOCK_SIZES["block_q"], query.shape[1]),
+                    block_k_major = min(DEFAULT_BLOCK_SIZES["block_k_major"], key.shape[1]),
+                    block_k = min(DEFAULT_BLOCK_SIZES["block_k"], key.shape[1])
+                )
+                output = torchax.interop.call_jax(
+                    flash_attention.flash_attention,
                     query.permute(0, 2, 1, 3),
                     key.permute(0, 2, 1, 3),
                     value.permute(0, 2, 1, 3),
-                    True,
+                    causal = True,
+                    block_sizes = block_sizes
                 )
                 output = output.permute(0, 2, 1, 3)
             else:
@@ -226,7 +297,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 num_kv_pages_per_compute_block = 16
                 num_queries_per_compute_block = 16
                 assert seq_len % num_queries_per_compute_block == 0
-                output = torch.ops.xla.multi_queries_paged_attention(
+                output = torchax.interop.call_jax(
+                    multi_queries_paged_attention,
                     query,
                     key_cache,
                     value_cache,
@@ -300,15 +372,16 @@ def write_to_kv_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
-    torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
-
     key = key.flatten(0, 2)
     value = value.flatten(0, 2)
+    key_cache_shape = key_cache.shape
+    value_cache_shape = value_cache.shape
     key_cache = key_cache.flatten(0, 2)
     value_cache = value_cache.flatten(0, 2)
-    key_cache.index_copy_(0, slot_mapping, key)
-    value_cache.index_copy_(0, slot_mapping, value)
+    slot_mapping = slot_mapping.flatten()
+    key_cache = key_cache.index_copy(0, slot_mapping, key)
+    value_cache = value_cache.index_copy(0, slot_mapping, value)
+    return key_cache.reshape(key_cache_shape), value_cache.reshape(value_cache_shape)
 
 
 def paged_attention(
@@ -326,26 +399,14 @@ def paged_attention(
     else:
         megacore_mode = megacore_mode
 
-    # NOTE(woosuk): A temporary workaround to avoid the error:
-    # "xla::paged_attention() Expected a value of type 'str' for
-    # argument 'megacore_mode' but instead found type 'NoneType'."
-    if megacore_mode is not None:
-        output = torch.ops.xla.paged_attention(
-            query,
-            key_cache,
-            value_cache,
-            context_lens,
-            block_tables,
-            pages_per_compute_block,
-            megacore_mode=megacore_mode,
-        )
-    else:
-        output = torch.ops.xla.paged_attention(
-            query,
-            key_cache,
-            value_cache,
-            context_lens,
-            block_tables,
-            pages_per_compute_block,
-        )
+    output = torchax.interop.call_jax(
+        jax_paged_attention,
+        query,
+        key_cache,
+        value_cache,
+        context_lens,
+        block_tables,
+        pages_per_compute_block=pages_per_compute_block,
+        megacore_mode=megacore_mode,
+    )
     return output
