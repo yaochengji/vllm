@@ -183,7 +183,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache[0].numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
-            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
+            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping, seq_len > 1)
 
         query = query * self.scale
         if attn_metadata.num_prefills > 0:
@@ -296,17 +296,26 @@ def write_to_kv_cache(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
+    is_prefill: bool,
 ) -> None:
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
 
-    key = key.flatten(0, 1)
-    value = value.flatten(0, 1)
-    key_cache = key_cache.flatten(0, 1)
-    value_cache = value_cache.flatten(0, 1)
-    slot_mapping = slot_mapping.flatten()
-    key_cache.index_copy_(0, slot_mapping, key)
-    value_cache.index_copy_(0, slot_mapping, value)
+    if is_prefill:
+        bs, sq, hn, hs = key.shape
+        key = key.view(sq // 16, 16, hn, hs)
+        value = value.view(sq // 16, 16, hn, hs)
+        slot_mapping = slot_mapping.flatten()
+        key_cache.index_copy_(0, slot_mapping, key)
+        value_cache.index_copy_(0, slot_mapping, value)
+    else:
+        key = key.flatten(0, 1)
+        value = value.flatten(0, 1)
+        key_cache = key_cache.flatten(0, 1)
+        value_cache = value_cache.flatten(0, 1)
+        slot_mapping = slot_mapping.flatten()
+        key_cache.index_copy_(0, slot_mapping, key)
+        value_cache.index_copy_(0, slot_mapping, value)
 
 
 def paged_attention(

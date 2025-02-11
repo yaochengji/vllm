@@ -179,7 +179,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             position_ids = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int32,
                                        device=self.device)
-            slot_mapping = torch.zeros((batch_size, seq_len),
+            slot_mapping = torch.zeros((batch_size, seq_len // 16),
                                        dtype=torch.int64,
                                        device=self.device)
             input_lens = torch.ones((batch_size, ),
@@ -384,11 +384,11 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
             assert seq_group_metadata.block_tables is not None
             block_table = seq_group_metadata.block_tables[seq_id]
-            for i in range(num_computed_tokens, seq_len):
-                block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+            assert num_computed_tokens % 16 == 0
+            assert seq_len % 16 == 0
+            for i in range(num_computed_tokens, seq_len, 16):
+                block_number = block_table[i // 16]
+                slot_mapping.append(block_number)
             if num_computed_tokens > 0:
                 self.block_tables[batch_idx, :len(block_table)] = block_table
 
@@ -402,7 +402,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_paddings = padded_prompt_len - prompt_len
             input_tokens += [0] * num_paddings
             input_positions += [0] * num_paddings
-            slot_mapping += [_PAD_SLOT_ID] * num_paddings
+            slot_mapping += [_PAD_SLOT_ID] * (num_paddings // 16)
 
         assert len(prompt_lens) > 0
         num_prefills = len(prompt_lens)
@@ -645,12 +645,14 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 model_input.attn_metadata.effective_query_lens
             batch_size = model_input.input_lens.shape[0]
             start_idx = 0
+            start_slot_idx = 0
             next_token_ids = []
             for i in range(batch_size):
                 # Get the actual prefill_len.
                 prefill_len = model_input.input_lens[i:i + 1].item()
                 prefill_len = _get_padded_prefill_len(prefill_len)
                 end_idx = start_idx + prefill_len
+                end_slot_idx = start_slot_idx + prefill_len // 16
 
                 token_ids = model_input.token_ids[None, start_idx:end_idx].to(
                     self.device)
@@ -660,7 +662,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 attn_metadata = model_input.attn_metadata
                 attn_metadata.num_prefills = 1
                 attn_metadata.slot_mapping = orig_slot_mapping[
-                    None, start_idx:end_idx].to(self.device)
+                    None, start_slot_idx:end_slot_idx].to(self.device)
+                
                 if orig_context_lens[i].item() > 0:
                     attn_metadata.context_lens = orig_context_lens[i:i + 1].to(
                         self.device)
@@ -684,6 +687,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                                   kv_caches)
                 next_token_ids.append(output_token_ids[0])
                 start_idx = end_idx
+                start_slot_idx = end_slot_idx
 
             if model_input.async_callback is not None:
                 model_input.async_callback()
