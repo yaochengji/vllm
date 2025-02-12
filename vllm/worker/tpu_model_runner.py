@@ -106,6 +106,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         is_driver_worker: bool = False,
     ):
         ModelRunnerBase.__init__(self, vllm_config=vllm_config)
+        assert self.block_size % MIN_PREFILL_SEQ_LEN == 0, f"block size
+          is required to be multiple of {MIN_PREFILL_SEQ_LEN} for better performance"
         self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
@@ -173,16 +175,18 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     ) -> None:
         exec_mode = ExecutionMode(exec_mode)
         if exec_mode.is_prefill():
-            seq_len = (seq_len + MIN_PREFILL_SEQ_LEN - 1) // MIN_PREFILL_SEQ_LEN * MIN_PREFILL_SEQ_LEN
+            seq_len = (seq_len + MIN_PREFILL_SEQ_LEN -
+                       1) // MIN_PREFILL_SEQ_LEN * MIN_PREFILL_SEQ_LEN
             token_ids = torch.zeros((batch_size, seq_len),
                                     dtype=torch.int32,
                                     device=self.device)
             position_ids = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int32,
                                        device=self.device)
-            slot_mapping = torch.zeros((batch_size, seq_len // MIN_PREFILL_SEQ_LEN),
-                                       dtype=torch.int64,
-                                       device=self.device)
+            slot_mapping = torch.zeros(
+                (batch_size, seq_len // MIN_PREFILL_SEQ_LEN),
+                dtype=torch.int64,
+                device=self.device)
             input_lens = torch.ones((batch_size, ),
                                     dtype=torch.int32,
                                     device=self.device)
@@ -351,8 +355,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
-        # FIXME(chengjiyao): remove the assertion
-        assert self.block_size % MIN_PREFILL_SEQ_LEN == 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
         prompt_lens: List[int] = []
@@ -404,7 +406,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_paddings = padded_prompt_len - prompt_len
             input_tokens += [0] * num_paddings
             input_positions += [0] * num_paddings
-            slot_mapping += [_PAD_SLOT_ID] * (num_paddings // MIN_PREFILL_SEQ_LEN)
+            slot_mapping += [_PAD_SLOT_ID
+                             ] * (num_paddings // MIN_PREFILL_SEQ_LEN)
 
         assert len(prompt_lens) > 0
         num_prefills = len(prompt_lens)
@@ -665,7 +668,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 attn_metadata.num_prefills = 1
                 attn_metadata.slot_mapping = orig_slot_mapping[
                     None, start_slot_idx:end_slot_idx].to(self.device)
-                
+
                 if orig_context_lens[i].item() > 0:
                     attn_metadata.context_lens = orig_context_lens[i:i + 1].to(
                         self.device)

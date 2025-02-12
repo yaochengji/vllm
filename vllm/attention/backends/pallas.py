@@ -13,6 +13,7 @@ from vllm.attention.backends.utils import CommonAttentionState
 
 MIN_PREFILL_SEQ_LEN = 16
 
+
 class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
@@ -184,7 +185,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache[0].numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
-            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping, seq_len > 1)
+            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping,
+                              seq_len > 1)
 
         query = query * self.scale
         if attn_metadata.num_prefills > 0:
@@ -303,7 +305,7 @@ def write_to_kv_cache(
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
 
     if is_prefill:
-        bs, sq, hn, hs = key.shape
+        _, _, hn, hs = key.shape
         key = key.view(-1, MIN_PREFILL_SEQ_LEN, hn, hs)
         value = value.view(-1, MIN_PREFILL_SEQ_LEN, hn, hs)
         slot_mapping = slot_mapping.flatten()
