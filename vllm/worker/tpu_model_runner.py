@@ -106,8 +106,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         is_driver_worker: bool = False,
     ):
         ModelRunnerBase.__init__(self, vllm_config=vllm_config)
-        assert self.block_size % MIN_PREFILL_SEQ_LEN == 0, f"block size
-          is required to be multiple of {MIN_PREFILL_SEQ_LEN} for better performance"
+        assert self.block_size % MIN_PREFILL_SEQ_LEN == 0, (
+            f"block size is required to be multiple of {MIN_PREFILL_SEQ_LEN}"
+            "for better performance")
         self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
@@ -345,7 +346,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
             if batch_size >= self.scheduler_config.max_num_seqs:
                 break
-            batch_size = batch_size + MIN_PREFILL_SEQ_LEN if batch_size >= MIN_PREFILL_SEQ_LEN else batch_size * 2
+            batch_size = (batch_size + MIN_PREFILL_SEQ_LEN if batch_size
+                          >= MIN_PREFILL_SEQ_LEN else batch_size * 2)
 
         end = time.time()
         logger.info("Compilation for decode done in %.2f s.", end - start)
@@ -657,7 +659,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 prefill_len = model_input.input_lens[i:i + 1].item()
                 prefill_len = _get_padded_prefill_len(prefill_len)
                 end_idx = start_idx + prefill_len
-                end_slot_idx = start_slot_idx + prefill_len // MIN_PREFILL_SEQ_LEN
+                end_slot_idx = (start_slot_idx +
+                                prefill_len // MIN_PREFILL_SEQ_LEN)
 
                 token_ids = model_input.token_ids[None, start_idx:end_idx].to(
                     self.device)
@@ -821,27 +824,6 @@ class ModelWrapper(nn.Module):
             num_prompts=attn_metadata.num_prefills,
         )
 
-        # Skip this in memory profiling at initialization.
-        # if kv_caches[0][0].numel() > 0:
-        #     # index_copy_(slot_mapping) only works when the inserted dimension
-        #     # is 0. However, the KV cache in the Pallas backend has the shape
-        #     # [num_kv_heads, num_blocks, block_size, head_size]. To make it
-        #     # work, we need to flatten the first three dimensions and modify
-        #     # the slot_mapping accordingly.
-        #     num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
-        #     slot_mapping = attn_metadata.slot_mapping
-        #     slot_mapping = slot_mapping.flatten()
-        #     head_indicies = torch.arange(0,
-        #                                  num_kv_heads,
-        #                                  device=slot_mapping.device,
-        #                                  dtype=slot_mapping.dtype)
-        #     head_indicies *= block_size * num_blocks
-        #     slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
-        #         -1, num_kv_heads)
-        #     slot_mapping = slot_mapping + head_indicies.view(1, -1)
-        #     slot_mapping = slot_mapping.flatten()
-        #     attn_metadata.slot_mapping = slot_mapping
-
         hidden_states = self.model(
             token_ids,
             position_ids,
@@ -876,17 +858,18 @@ class ModelWrapper(nn.Module):
 
 def _get_padded_prefill_len(x: int) -> int:
     # NOTE(woosuk): The pallas FlashAttention kernel requires the sequence
-    # length to be a multiple of MIN_PREFILL_SEQ_LEN. We pad the prompt length to the nearest
-    # multiple of MIN_PREFILL_SEQ_LEN. This is also good for performance.
+    # length to be a multiple of MIN_PREFILL_SEQ_LEN. We pad the prompt length
+    # to the nearest multiple of MIN_PREFILL_SEQ_LEN. This is also good for
+    # performance.
     if x <= MIN_PREFILL_SEQ_LEN:
         return MIN_PREFILL_SEQ_LEN
     return 1 << (x - 1).bit_length()
 
 
 def _get_padded_batch_size(batch_size: int) -> int:
-    # The GMM Pallas kernel requires num_tokens * topk to be a multiple of MIN_PREFILL_SEQ_LEN.
-    # To meet this requirement in the simplest way, we set the minimal batch
-    # size to 8.
+    # The GMM Pallas kernel requires num_tokens * topk to be a multiple of
+    # MIN_PREFILL_SEQ_LEN. To meet this requirement in the simplest way, we set
+    # the minimal batch size to 8.
     if batch_size <= 8:
         return 8
     else:
