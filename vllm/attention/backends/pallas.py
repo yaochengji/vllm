@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 
+MIN_PREFILL_SEQ_LEN = 16
 
 class PallasAttentionBackend(AttentionBackend):
 
@@ -303,8 +304,8 @@ def write_to_kv_cache(
 
     if is_prefill:
         bs, sq, hn, hs = key.shape
-        key = key.view(sq // 16, 16, hn, hs)
-        value = value.view(sq // 16, 16, hn, hs)
+        key = key.view(sq // MIN_PREFILL_SEQ_LEN, MIN_PREFILL_SEQ_LEN, hn, hs)
+        value = value.view(sq // MIN_PREFILL_SEQ_LEN, MIN_PREFILL_SEQ_LEN, hn, hs)
         slot_mapping = slot_mapping.flatten()
         key_cache.index_copy_(0, slot_mapping, key)
         value_cache.index_copy_(0, slot_mapping, value)

@@ -14,6 +14,7 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention.backends.pallas import MIN_PREFILL_SEQ_LEN
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -172,14 +173,14 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     ) -> None:
         exec_mode = ExecutionMode(exec_mode)
         if exec_mode.is_prefill():
-            seq_len = (seq_len + 15) // 16 * 16
+            seq_len = (seq_len + 15) // MIN_PREFILL_SEQ_LEN * MIN_PREFILL_SEQ_LEN
             token_ids = torch.zeros((batch_size, seq_len),
                                     dtype=torch.int32,
                                     device=self.device)
             position_ids = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int32,
                                        device=self.device)
-            slot_mapping = torch.zeros((batch_size, seq_len // 16),
+            slot_mapping = torch.zeros((batch_size, seq_len // MIN_PREFILL_SEQ_LEN),
                                        dtype=torch.int64,
                                        device=self.device)
             input_lens = torch.ones((batch_size, ),
@@ -286,7 +287,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         logger.info("Compiling the model with different input shapes...")
         start = time.time()
         for batch_size in [1]:
-            seq_len = 16
+            seq_len = MIN_PREFILL_SEQ_LEN
             while seq_len <= self.model_config.max_model_len:
                 self._dummy_run(batch_size,
                                 seq_len,
@@ -308,7 +309,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                         "prefix prefill...")
             start = time.time()
             for batch_size in [1]:
-                seq_len = 16
+                seq_len = MIN_PREFILL_SEQ_LEN
                 while seq_len <= self.model_config.max_model_len:
                     self._dummy_run(batch_size,
                                     seq_len,
@@ -340,7 +341,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
             if batch_size >= self.scheduler_config.max_num_seqs:
                 break
-            batch_size = batch_size + 16 if batch_size >= 16 else batch_size * 2
+            batch_size = batch_size + MIN_PREFILL_SEQ_LEN if batch_size >= MIN_PREFILL_SEQ_LEN else batch_size * 2
 
         end = time.time()
         logger.info("Compilation for decode done in %.2f s.", end - start)
@@ -350,6 +351,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
+        # FIXME(chengjiyao): remove the assertion
+        assert self.block_size % MIN_PREFILL_SEQ_LEN == 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
         prompt_lens: List[int] = []
@@ -384,10 +387,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
             assert seq_group_metadata.block_tables is not None
             block_table = seq_group_metadata.block_tables[seq_id]
-            assert num_computed_tokens % 16 == 0
-            assert seq_len % 16 == 0
-            for i in range(num_computed_tokens, seq_len, 16):
-                block_number = block_table[i // 16]
+            assert num_computed_tokens % MIN_PREFILL_SEQ_LEN == 0
+            for i in range(num_computed_tokens, seq_len, MIN_PREFILL_SEQ_LEN):
+                block_number = block_table[i // MIN_PREFILL_SEQ_LEN]
                 slot_mapping.append(block_number)
             if num_computed_tokens > 0:
                 self.block_tables[batch_idx, :len(block_table)] = block_table
@@ -402,7 +404,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_paddings = padded_prompt_len - prompt_len
             input_tokens += [0] * num_paddings
             input_positions += [0] * num_paddings
-            slot_mapping += [_PAD_SLOT_ID] * (num_paddings // 16)
+            slot_mapping += [_PAD_SLOT_ID] * (num_paddings // MIN_PREFILL_SEQ_LEN)
 
         assert len(prompt_lens) > 0
         num_prefills = len(prompt_lens)
@@ -652,7 +654,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 prefill_len = model_input.input_lens[i:i + 1].item()
                 prefill_len = _get_padded_prefill_len(prefill_len)
                 end_idx = start_idx + prefill_len
-                end_slot_idx = start_slot_idx + prefill_len // 16
+                end_slot_idx = start_slot_idx + prefill_len // MIN_PREFILL_SEQ_LEN
 
                 token_ids = model_input.token_ids[None, start_idx:end_idx].to(
                     self.device)
@@ -871,21 +873,21 @@ class ModelWrapper(nn.Module):
 
 def _get_padded_prefill_len(x: int) -> int:
     # NOTE(woosuk): The pallas FlashAttention kernel requires the sequence
-    # length to be a multiple of 16. We pad the prompt length to the nearest
-    # multiple of 16. This is also good for performance.
-    if x <= 16:
-        return 16
+    # length to be a multiple of MIN_PREFILL_SEQ_LEN. We pad the prompt length to the nearest
+    # multiple of MIN_PREFILL_SEQ_LEN. This is also good for performance.
+    if x <= MIN_PREFILL_SEQ_LEN:
+        return MIN_PREFILL_SEQ_LEN
     return 1 << (x - 1).bit_length()
 
 
 def _get_padded_batch_size(batch_size: int) -> int:
-    # The GMM Pallas kernel requires num_tokens * topk to be a multiple of 16.
+    # The GMM Pallas kernel requires num_tokens * topk to be a multiple of MIN_PREFILL_SEQ_LEN.
     # To meet this requirement in the simplest way, we set the minimal batch
     # size to 8.
     if batch_size <= 8:
         return 8
     else:
-        return ((batch_size + 15) // 16) * 16
+        return ((batch_size + 15) // MIN_PREFILL_SEQ_LEN) * MIN_PREFILL_SEQ_LEN
 
 
 def _apply_top_p(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
