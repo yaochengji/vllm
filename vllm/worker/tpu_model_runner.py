@@ -173,7 +173,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     ) -> None:
         exec_mode = ExecutionMode(exec_mode)
         if exec_mode.is_prefill():
-            seq_len = (seq_len + 15) // MIN_PREFILL_SEQ_LEN * MIN_PREFILL_SEQ_LEN
+            seq_len = (seq_len + MIN_PREFILL_SEQ_LEN - 1) // MIN_PREFILL_SEQ_LEN * MIN_PREFILL_SEQ_LEN
             token_ids = torch.zeros((batch_size, seq_len),
                                     dtype=torch.int32,
                                     device=self.device)
@@ -259,10 +259,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # be re-compiled for every different shapes. This overhead is inevitable
         # in the first run, but can be skipped afterwards as we cache the XLA
         # graphs in the disk (VLLM_XLA_CACHE_PATH).
+        # NOTE(chengjiyao): During prefill, seq_len cannot be marked as dynamic
+        # because it is used to calculate the output shape of a view op.
         if exec_mode.is_prefill():
             # Prefll
-            torch._dynamo.mark_dynamic(token_ids, 1)
-            torch._dynamo.mark_dynamic(position_ids, 1)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
         else:
             # Decode
@@ -887,7 +887,7 @@ def _get_padded_batch_size(batch_size: int) -> int:
     if batch_size <= 8:
         return 8
     else:
-        return ((batch_size + 15) // MIN_PREFILL_SEQ_LEN) * MIN_PREFILL_SEQ_LEN
+        return ((batch_size + 15) // 16) * 16
 
 
 def _apply_top_p(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
