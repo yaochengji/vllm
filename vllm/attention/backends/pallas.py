@@ -11,6 +11,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 
+MIN_PREFILL_SEQ_LEN = 16
+
 
 class PallasAttentionBackend(AttentionBackend):
 
@@ -37,7 +39,7 @@ class PallasAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_kv_heads, num_blocks, block_size, head_size)
+        return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -183,7 +185,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache[0].numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
-            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
+            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping,
+                              seq_len > 1)
 
         query = query * self.scale
         if attn_metadata.num_prefills > 0:
@@ -222,8 +225,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 assert seq_len % num_queries_per_compute_block == 0
                 output = torch.ops.xla.multi_queries_paged_attention(
                     query,
-                    key_cache,
-                    value_cache,
+                    key_cache.permute(2, 0, 1, 3),
+                    value_cache.permute(2, 0, 1, 3),
                     attn_metadata.context_lens,
                     attn_metadata.block_tables,
                     attn_metadata.effective_query_lens,
@@ -252,8 +255,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             if batch_size <= max_num_seq:
                 output = paged_attention(
                     query,
-                    key_cache,
-                    value_cache,
+                    key_cache.permute(2, 0, 1, 3),
+                    value_cache.permute(2, 0, 1, 3),
                     attn_metadata.context_lens,
                     attn_metadata.block_tables,
                     pages_per_compute_block,
@@ -276,8 +279,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     # chunk_end = min(chunk_end, batch_size)
                     chunk_output = paged_attention(
                         query[chunk_start:chunk_end],
-                        key_cache,
-                        value_cache,
+                        key_cache.permute(2, 0, 1, 3),
+                        value_cache.permute(2, 0, 1, 3),
                         attn_metadata.context_lens[chunk_start:chunk_end],
                         attn_metadata.block_tables[chunk_start:chunk_end],
                         pages_per_compute_block,
@@ -296,16 +299,26 @@ def write_to_kv_cache(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
+    is_prefill: bool,
 ) -> None:
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
 
-    key = key.flatten(0, 2)
-    value = value.flatten(0, 2)
-    key_cache = key_cache.flatten(0, 2)
-    value_cache = value_cache.flatten(0, 2)
-    key_cache.index_copy_(0, slot_mapping, key)
-    value_cache.index_copy_(0, slot_mapping, value)
+    if is_prefill:
+        _, _, hn, hs = key.shape
+        key = key.view(-1, MIN_PREFILL_SEQ_LEN, hn, hs)
+        value = value.view(-1, MIN_PREFILL_SEQ_LEN, hn, hs)
+        slot_mapping = slot_mapping.flatten()
+        key_cache.index_copy_(0, slot_mapping, key)
+        value_cache.index_copy_(0, slot_mapping, value)
+    else:
+        key = key.flatten(0, 1)
+        value = value.flatten(0, 1)
+        key_cache = key_cache.flatten(0, 1)
+        value_cache = value_cache.flatten(0, 1)
+        slot_mapping = slot_mapping.flatten()
+        key_cache.index_copy_(0, slot_mapping, key)
+        value_cache.index_copy_(0, slot_mapping, value)
 
 
 def paged_attention(
