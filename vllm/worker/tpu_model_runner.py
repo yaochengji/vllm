@@ -106,12 +106,12 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         is_driver_worker: bool = False,
     ):
         ModelRunnerBase.__init__(self, vllm_config=vllm_config)
-        assert self.block_size % MIN_PREFILL_SEQ_LEN == 0, (
-            f"block size is required to be multiple of {MIN_PREFILL_SEQ_LEN}"
-            "for better performance")
         self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
+        assert self.block_size % MIN_PREFILL_SEQ_LEN == 0, (
+            f"block size is required to be multiple of {MIN_PREFILL_SEQ_LEN}"
+            "for better performance")
         self.max_num_blocks_per_seq = (self.model_config.max_model_len //
                                        self.block_size)
         self.block_tables = np.zeros(
