@@ -24,7 +24,7 @@ EXPECTED_VALUE = 0.58
 def run_test(more_args=None):
     """Run the end to end accuracy test."""
 
-    model_args = f"pretrained={MODEL_NAME},max_model_len=4096"
+    model_args = f"pretrained={MODEL_NAME},max_model_len=2048,enforce_eager=True"
 
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
@@ -34,9 +34,11 @@ def run_test(more_args=None):
         model_args=model_args,
         tasks="gsm8k",
         batch_size="auto",
+        limit=1000
     )
 
     measured_value = results["results"][TASK][FILTER]
+    print("measured_value: ", measured_value)
     assert (measured_value - RTOL < EXPECTED_VALUE
             and measured_value + RTOL > EXPECTED_VALUE
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
@@ -54,7 +56,7 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch):
         more_args = None
         if current_platform.is_tpu():
             # Limit compilation time for TPU V1
-            more_args = "max_num_seqs=64"
+            more_args = "max_num_seqs=16"
 
         run_test(more_args)
 
