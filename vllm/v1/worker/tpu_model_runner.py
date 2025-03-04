@@ -14,7 +14,7 @@ import torch_xla.runtime as xr
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingType
@@ -405,11 +405,9 @@ class TPUModelRunner:
         padded_block_table[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
         padded_block_table = padded_block_table.to(self.device)
-        query_start_loc = self.query_start_loc_cpu[:
-                                                   padded_total_num_scheduled_tokens
-                                                   + 1].to(self.device)
-        seq_lens = self.seq_lens_cpu[:padded_total_num_scheduled_tokens].to(
+        query_start_loc = self.query_start_loc_cpu[:num_reqs + 1].to(
             self.device)
+        seq_lens = self.seq_lens_cpu[:num_reqs].to(self.device)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -659,28 +657,6 @@ class ModelWrapperV1(nn.Module):
             kv_caches: The key and value caches. They can be None during the
                 memory profiling at initialization.
         """
-        # Skip this in memory profiling at initialization.
-        if kv_caches[0][0].numel() > 0:
-            attn_metadata = get_forward_context().attn_metadata
-            # index_copy_(slot_mapping) only works when the inserted dimension
-            # is 0. However, the KV cache in the Pallas backend has the shape
-            # [num_kv_heads, num_blocks, block_size, head_size]. To make it
-            # work, we need to flatten the first three dimensions and modify
-            # the slot_mapping accordingly.
-            # kv_caches: List[Tuple[torch.Tensor, torch.Tensor]]
-            num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
-            slot_mapping = attn_metadata.slot_mapping
-            slot_mapping = slot_mapping.flatten()
-            head_indicies = torch.arange(0,
-                                         num_kv_heads,
-                                         device=slot_mapping.device,
-                                         dtype=slot_mapping.dtype)
-            head_indicies *= block_size * num_blocks
-            slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
-                -1, num_kv_heads)
-            slot_mapping = slot_mapping + head_indicies.view(1, -1)
-            slot_mapping = slot_mapping.flatten()
-            attn_metadata.slot_mapping = slot_mapping
 
         assert self.model is not None
         hidden_states = self.model(
