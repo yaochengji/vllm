@@ -330,6 +330,7 @@ class TPUModelRunner:
         return kv_cache_spec
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+        start_time = time.perf_counter()
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -413,23 +414,30 @@ class TPUModelRunner:
         # Do the padding and copy the tensors to the TPU.
         padded_total_num_scheduled_tokens = _get_padded_token_len(
             total_num_scheduled_tokens)
-        self.input_ids = self.input_ids_cpu[:
-                                            padded_total_num_scheduled_tokens].to(
-                                                self.device)
-        self.position_ids = self.positions_cpu[:
-                                               padded_total_num_scheduled_tokens].to(
-                                                   self.device)
+        input_ids_cpu_tmp = self.input_ids_cpu[:
+                                            padded_total_num_scheduled_tokens]
+        positions_cpu_tmp = self.positions_cpu[:
+                                               padded_total_num_scheduled_tokens]
         self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
-        slot_mapping = self.slot_mapping_cpu[:
-                                             padded_total_num_scheduled_tokens].to(
-                                                 self.device)
+        padded_num_reqs = _get_padded_num_reqs_with_upper_limit(
+            num_reqs, self.max_num_reqs)
+        logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
+        slot_mapping_cpu_tmp = self.slot_mapping_cpu[:
+                                             padded_total_num_scheduled_tokens]
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
+        query_start_loc_cpu_tmp = self.query_start_loc_cpu[:self.max_num_reqs + 1]
+        seq_lens_cpu_tmp = self.seq_lens_cpu[:self.max_num_reqs]
+        end_time = time.perf_counter()
+        print(f"===== prepare_inputs on cpu: {(end_time - start_time) * 1000}ms")
+
+        self.input_ids = input_ids_cpu_tmp.to(self.device)
+        self.position_ids = positions_cpu_tmp.to(self.device)
+        slot_mapping = slot_mapping_cpu_tmp.to(self.device)
         block_tables = block_tables.to(self.device)
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
-            self.device)
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
+        query_start_loc = query_start_loc_cpu_tmp.to(self.device)
+        seq_lens = seq_lens_cpu_tmp.to(self.device)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -445,9 +453,6 @@ class TPUModelRunner:
         # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
         # TODO: Support prompt logprobs.
-        padded_num_reqs = _get_padded_num_reqs_with_upper_limit(
-            num_reqs, self.max_num_reqs)
-        logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
         return attn_metadata, logits_indices
 
@@ -544,7 +549,10 @@ class TPUModelRunner:
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
         # Update cached state
+        start_time = time.perf_counter()
         self._update_states(scheduler_output)
+        end_time = time.perf_counter()
+        print(f"========== _update_states: {(end_time - start_time) * 1000}ms")
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -590,6 +598,7 @@ class TPUModelRunner:
                                                        logits_indices, None)
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
+        start_time = time.perf_counter()
         # Then, let's update the cache state.
         request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
@@ -647,6 +656,8 @@ class TPUModelRunner:
             logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
+        end_time = time.perf_counter()
+        print(f"====================== post time: {((end_time - start_time) * 1000):.2f}ms")
         return model_runner_output
 
     def load_model(self) -> None:
