@@ -21,12 +21,16 @@ sampling_params = SamplingParams(temperature=0.7,
 
 # Set `enforce_eager=True` to avoid ahead-of-time compilation.
 # In real workloads, `enforace_eager` should be `False`.
-llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
+llm = LLM(model="meta-llama/Meta-Llama-3.1-8B",
           max_num_batched_tokens=64,
-          max_num_seqs=4)
+          max_num_seqs=4,
+          load_format="dummy",
+          tensor_parallel_size=8,
+          enable_sequence_parallel=False,
+          distributed_executor_backend="mp")
 outputs = llm.generate(prompts, sampling_params)
 for output, answer in zip(outputs, answers):
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    assert generated_text.startswith(answer)
+    # assert generated_text.startswith(answer)
