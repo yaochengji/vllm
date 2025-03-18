@@ -26,8 +26,7 @@ llm = LLM(model="meta-llama/Meta-Llama-3.1-8B",
           max_num_seqs=4,
           load_format="dummy",
           tensor_parallel_size=8,
-          enable_sequence_parallel=False,
-          distributed_executor_backend="mp")
+          enable_sequence_parallel=True)
 outputs = llm.generate(prompts, sampling_params)
 for output, answer in zip(outputs, answers):
     prompt = output.prompt
