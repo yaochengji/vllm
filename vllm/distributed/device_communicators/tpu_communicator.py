@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 from torch.distributed import ProcessGroup
@@ -22,9 +22,38 @@ if current_platform.is_tpu():
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
     from torch_xla._internal import pjrt
+    from torch_xla.distributed.xla_multiprocessing import create_optimized_replica_groups
 
     if USE_RAY:
         from vllm.executor import ray_utils
+
+
+@torch.library.custom_op("tpu::all_gather", mutates_args=())
+def tpu_all_gather(input_: torch.Tensor, dim: int, groups: Sequence[int]) -> torch.Tensor:
+    return xm.all_gather(input_, dim=dim, groups=[groups], pin_layout=False,
+                             channel_id=1, use_global_device_ids=True)
+
+@tpu_all_gather.register_fake
+def _(input_: torch.Tensor, dim: int, groups: Sequence[int]):
+    input_shape = list(input_.shape)
+    output_shape = input_shape[:]
+    output_shape[dim] = input_shape[dim] * len(groups)
+    return input_.new_empty(*output_shape)
+
+
+@torch.library.custom_op("tpu::reduce_scatter", mutates_args=())
+def tpu_reduce_scatter(input_: torch.Tensor, groups: Sequence[int]) -> torch.Tensor:
+    return xm.reduce_scatter(xm.REDUCE_SUM, input_, scale=1.0, scatter_dim=0, 
+                             shard_count=len(groups), groups=[groups],
+                             pin_layout=False, channel_id=1, use_global_device_ids=True)
+
+@tpu_reduce_scatter.register_fake
+def _(input_: torch.Tensor, groups: Sequence[int]):
+    input_shape = list(input_.shape)
+    assert input_shape[0] % len(groups) == 0
+    output_shape = input_shape[:]
+    output_shape[0] = input_shape[0] // len(groups)
+    return input_.new_empty(*output_shape)
 
 
 class TpuCommunicator(DeviceCommunicatorBase):
@@ -80,9 +109,16 @@ class TpuCommunicator(DeviceCommunicatorBase):
         pjrt.initialize_multiprocess(local_rank, local_world_size)
         xr._init_world_size_ordinal()
 
+        self.optimized_replica_groups = create_optimized_replica_groups()
+        if self.optimized_replica_groups is None:
+            self.optimized_replica_groups = [[i for i in range(global_world_size)]]
+        self.optimized_replica_groups = self.optimized_replica_groups[0]
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         return xm.all_reduce(xm.REDUCE_SUM, input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        assert dim == -1, "TPUs only support dim=-1 for all-gather."
-        return xm.all_gather(input_, dim=dim)
+        return tpu_all_gather(input_, dim, self.optimized_replica_groups)
+
+    def reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor:
+        return tpu_reduce_scatter(input_, self.optimized_replica_groups)

@@ -606,7 +606,8 @@ class TPUModelRunner:
             from_sampling_metadata(sampling_metadata, logits_indices,
                                     num_reqs, self.device)
         # Run the decoder
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(attn_metadata, self.vllm_config,
+                                 enable_sequence_parallel=self.parallel_config.enable_sequence_parallel):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
@@ -760,7 +761,8 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        with set_forward_context(attn_metadata, self.vllm_config, 0):
+        with set_forward_context(attn_metadata, self.vllm_config, 0,
+                                 enable_sequence_parallel=self.parallel_config.enable_sequence_parallel):
             self.model(input_ids=input_ids,
                        positions=position_ids,
                        kv_caches=kv_caches,
