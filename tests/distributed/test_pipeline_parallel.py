@@ -551,7 +551,7 @@ SP_TEST_MODELS = [
         if model_id in SP_TEST_MODELS
     ],
 )
-@create_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_tp_sp_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
@@ -569,4 +569,4 @@ def test_tp_sp_generation(
                 test_options,
                 num_gpus_available,
                 method="generate",
-                is_multimodal=True)
+                is_multimodal=False)
