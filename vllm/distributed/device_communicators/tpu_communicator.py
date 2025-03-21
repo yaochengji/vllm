@@ -112,6 +112,7 @@ class TpuCommunicator(DeviceCommunicatorBase):
         self.optimized_replica_groups = create_optimized_replica_groups()
         if self.optimized_replica_groups is None:
             self.optimized_replica_groups = [[i for i in range(global_world_size)]]
+        # self.optimized_replica_groups = [[i for i in range(global_world_size)]]
         self.optimized_replica_groups = self.optimized_replica_groups[0]
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:

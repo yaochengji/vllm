@@ -25,10 +25,13 @@ llm = LLM(model="meta-llama/Meta-Llama-3.1-8B",
           max_num_batched_tokens=64,
           max_num_seqs=4,
         #   load_format="dummy",
+          enforce_eager=True,
           tensor_parallel_size=8,
           max_model_len=64,
-          enable_sequence_parallel=False)
-outputs = llm.generate(prompts, sampling_params)
+          enable_sequence_parallel=True,
+        #   distributed_executor_backend="ray",
+          )
+outputs = llm.generate(prompts, None)
 for output, answer in zip(outputs, answers):
     prompt = output.prompt
     generated_text = output.outputs[0].text

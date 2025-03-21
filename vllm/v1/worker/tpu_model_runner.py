@@ -27,6 +27,7 @@ from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
                                                PallasAttentionBackend,
                                                PallasMetadata)
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -615,7 +616,7 @@ class TPUModelRunner:
                 inputs_embeds=inputs_embeds,
             )
         selected_token_ids = self.model.sample_from_hidden(
-            hidden_states, tpu_sampling_metadata)
+            hidden_states, tpu_sampling_metadata, self.parallel_config.enable_sequence_parallel)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
@@ -697,7 +698,7 @@ class TPUModelRunner:
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        xm_tp_rank = xr.global_ordinal()
+        xm_tp_rank = _get_optimized_xr_rank()
         with patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
@@ -761,7 +762,7 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        with set_forward_context(attn_metadata, self.vllm_config, 0,
+        with set_forward_context(attn_metadata, self.vllm_config,
                                  enable_sequence_parallel=self.parallel_config.enable_sequence_parallel):
             self.model(input_ids=input_ids,
                        positions=position_ids,
@@ -778,11 +779,10 @@ class TPUModelRunner:
         while True:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(self.kv_caches, num_tokens)
-            xm.mark_step()
+            xm.wait_device_ops()
             if num_tokens >= self.max_num_tokens:
                 break
             num_tokens *= 2
-        xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
 
@@ -795,6 +795,8 @@ class TPUModelRunner:
         # n_tokens x max_num_reqs. Graph is really small so this is fine.
         while True:
             num_reqs_to_sample = MIN_NUM_SEQS
+            if self.parallel_config.enable_sequence_parallel:
+                num_tokens //= self.parallel_config.world_size
             dummy_hidden = torch.randn((num_tokens, hsize),
                                        device=device,
                                        dtype=torch.bfloat16)
@@ -812,7 +814,7 @@ class TPUModelRunner:
                                            num_reqs_to_sample, device)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
-                self.model.sample_from_hidden(dummy_hidden, sampling_meta)
+                self.model.sample_from_hidden(dummy_hidden, sampling_meta, self.parallel_config.enable_sequence_parallel)
                 xm.mark_step()
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
@@ -916,12 +918,15 @@ class ModelWrapperV1(nn.Module):
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: TPUSupportedSamplingMetadata,
+        enable_sequence_parallel: bool,
     ) -> torch.Tensor:
         """
         Sample with xla-friendly function. This function is to be traced 
         separately from `forward` for lighter compilation overhead.
         """
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
+        if enable_sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
         logits = self.compute_logits(sample_hidden_states)
@@ -960,3 +965,11 @@ def _get_padded_token_len(x: int) -> int:
 def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
     res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
+
+def _get_optimized_xr_rank():
+    from torch_xla.distributed.xla_multiprocessing import create_optimized_replica_groups
+    rank = xr.global_ordinal()
+    optimized_group = create_optimized_replica_groups()
+    if optimized_group is None:
+        return rank
+    return optimized_group[0].index(rank)
