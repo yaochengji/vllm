@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Union
 import torch
 import torch.distributed
 
-from .parallel_state import get_tp_group
+from .parallel_state import all_gather, get_tp_group, reduce_scatter
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
@@ -16,13 +16,18 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
 def tensor_model_parallel_reduce_scatter(input_: torch.Tensor,
                                          dim: int) -> torch.Tensor:
     """Reduce-scatter the input tensor across model parallel group."""
-    return get_tp_group().reduce_scatter(input_, dim)
+    return reduce_scatter(input_, dim,
+                          get_tp_group().world_size,
+                          get_tp_group().unique_name)
 
 
 def tensor_model_parallel_all_gather(input_: torch.Tensor,
                                      dim: int = -1) -> torch.Tensor:
     """All-gather the input tensor across model parallel group."""
-    return get_tp_group().all_gather(input_, dim)
+    # return get_tp_group().all_gather(input_, dim)
+    return all_gather(input_, dim,
+                      get_tp_group().world_size,
+                      get_tp_group().unique_name)
 
 
 def tensor_model_parallel_gather(input_: torch.Tensor,

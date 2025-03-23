@@ -118,6 +118,25 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     return torch.empty_like(tensor)
 
 
+@torch.library.custom_op("mylib::all_gather", mutates_args=())
+def all_gather(tensor: torch.Tensor, dim: int, world_size: int,
+               group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group.all_gather(tensor, dim)
+
+
+@all_gather.register_fake
+def all_gather_fake(tensor: torch.Tensor, dim: int, world_size: int,
+                    group_name: str) -> torch.Tensor:
+    new_shape = list(tensor.shape)
+    new_shape[dim] = tensor.shape[dim] * world_size
+    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
+@torch.library.custom_op("mylib::reduce_scatter", mutates_args=())
 def reduce_scatter(tensor: torch.Tensor, dim: int, world_size: int,
                    group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
@@ -127,6 +146,7 @@ def reduce_scatter(tensor: torch.Tensor, dim: int, world_size: int,
     return group.reduce_scatter(tensor, dim)
 
 
+@reduce_scatter.register_fake
 def reduce_scatter_fake(tensor: torch.Tensor, dim: int, world_size: int,
                         group_name: str) -> torch.Tensor:
     new_shape = list(tensor.shape)
@@ -142,12 +162,12 @@ if supports_custom_op():
         fake_impl=all_reduce_fake,
     )
 
-    direct_register_custom_op(
-        op_name="reduce_scatter",
-        op_func=reduce_scatter,
-        mutates_args=[],
-        fake_impl=reduce_scatter_fake,
-    )
+    # direct_register_custom_op(
+    #     op_name="reduce_scatter",
+    #     op_func=reduce_scatter,
+    #     mutates_args=[],
+    #     fake_impl=reduce_scatter_fake,
+    # )
 
 
 class GroupCoordinator:

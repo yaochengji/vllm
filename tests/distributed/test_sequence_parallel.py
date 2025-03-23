@@ -66,15 +66,14 @@ class SPTestSettings:
     ):
         return SPTestSettings(
             parallel_setups=[
-                # TODO support eager_mode = False
-                # ParallelSetup(tp_size=tp_base,
-                #               sp_enabled=True,
-                #               eager_mode=False,
-                #               chunked_prefill=False),
-                # ParallelSetup(tp_size=tp_base,
-                #               sp_enabled=True,
-                #               eager_mode=False,
-                #               chunked_prefill=True),
+                ParallelSetup(tp_size=tp_base,
+                              sp_enabled=True,
+                              eager_mode=False,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base,
+                              sp_enabled=True,
+                              eager_mode=False,
+                              chunked_prefill=True),
                 ParallelSetup(tp_size=tp_base,
                               sp_enabled=True,
                               eager_mode=True,
@@ -84,7 +83,6 @@ class SPTestSettings:
                               eager_mode=True,
                               chunked_prefill=True)
             ],
-            # only ray is supported for V1
             distributed_backends=["mp", "mp", "ray", "ray"],
             vllm_major_versions=["0", "1", "0", "1"],
             task=task,
@@ -242,7 +240,7 @@ def _compare_sp(
 
 SP_TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    "meta-llama/Llama-3.2-1B-Instruct": SPTestSettings.fast(),
+    "meta-llama/Llama-3.2-1B-Instruct": SPTestSettings.detailed(),
 }
 
 SP_TEST_MODELS = [

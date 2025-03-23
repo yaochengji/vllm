@@ -3603,6 +3603,13 @@ class VllmConfig:
         looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
         """
 
+        small_size_list = [1, 2, 4]
+        if self.parallel_config.enable_sequence_parallel:
+            small_size_list = [
+                x for x in small_size_list
+                if x >= self.parallel_config.tensor_parallel_size
+            ]
+
         # calculate the default `batch_size_capture_list`
         if not envs.VLLM_USE_V1:
             batch_size_capture_list = []
@@ -3610,8 +3617,9 @@ class VllmConfig:
             if self.scheduler_config is not None and \
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:
-
-                possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
+                possible_sizes = small_size_list + [
+                    8 * i for i in range(1, 1025)
+                ]
                 # find the minimum size that is larger than max_num_seqs,
                 # which then becomes the max_batchsize_to_capture
                 larger_sizes = [
@@ -3633,8 +3641,9 @@ class VllmConfig:
             batch_size_capture_list = []
             if self.model_config is not None and \
                 not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
+                batch_size_capture_list = small_size_list + [
+                    i for i in range(8, 513, 8)
+                ]
                 max_num_tokens = self.scheduler_config.max_num_batched_tokens
                 batch_size_capture_list = [
                     size for size in batch_size_capture_list
