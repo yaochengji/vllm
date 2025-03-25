@@ -47,3 +47,7 @@ for output, answer in zip(outputs, answers):
 #   return _all_gather_using_all_reduce(
 #       value, dim=dim, groups=groups, pin_layout=True)
 
+
+# 2025.03.24
+# succeeded with following command and some modification on xla_model.py
+# DISABLE_NUMERIC_CC_TOKEN=1 VLLM_USE_V1=1 python examples/offline_inference/tpu.py

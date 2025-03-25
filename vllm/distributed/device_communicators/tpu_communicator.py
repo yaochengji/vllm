@@ -28,6 +28,7 @@ if current_platform.is_tpu():
 
 
 class TpuCommunicator(DeviceCommunicatorBase):
+    channel_id = 1
 
     def __init__(self,
                  cpu_group: ProcessGroup,
@@ -86,10 +87,12 @@ class TpuCommunicator(DeviceCommunicatorBase):
         return xm.all_reduce(xm.REDUCE_SUM, input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        self.channel_id += 1
         return xm.all_gather(input_, dim=dim, groups=self.groups, pin_layout=True,
-                             channel_id=1, use_global_device_ids=True)
+                             channel_id=self.channel_id, use_global_device_ids=True)
     
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        self.channel_id += 1
         return xm.reduce_scatter(xm.REDUCE_SUM, input_, scale=1.0, scatter_dim=dim, 
                                  shard_count=self.world_size, groups=self.groups,
-                                 pin_layout=True, channel_id=2, use_global_device_ids=True)
+                                 pin_layout=True, channel_id=self.channel_id, use_global_device_ids=True)

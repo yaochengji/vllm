@@ -612,6 +612,8 @@ class TPUModelRunner:
                 inputs_embeds=inputs_embeds,
                 enable_sequence_parallel=self.parallel_config.enable_sequence_parallel
             )
+            from vllm.distributed.device_communicators.tpu_communicator import TpuCommunicator
+            TpuCommunicator.channel_id = 1
         selected_token_ids = self.model.sample_from_hidden(
             hidden_states, tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
@@ -766,6 +768,8 @@ class TPUModelRunner:
                        kv_caches=kv_caches,
                        inputs_embeds=inputs_embeds,
                        enable_sequence_parallel=self.parallel_config.enable_sequence_parallel)
+            from vllm.distributed.device_communicators.tpu_communicator import TpuCommunicator
+            TpuCommunicator.channel_id = 1
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -914,6 +918,8 @@ class ModelWrapperV1(nn.Module):
         Sample with xla-friendly function. This function is to be traced 
         separately from `forward` for lighter compilation overhead.
         """
+        from vllm.distributed.device_communicators.tpu_communicator import TpuCommunicator
+        TpuCommunicator.channel_id = 1
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
