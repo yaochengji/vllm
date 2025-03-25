@@ -13,6 +13,7 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
@@ -602,12 +603,14 @@ class TPUModelRunner:
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, logits_indices)
         # Run the decoder
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(attn_metadata, self.vllm_config,
+                                 enable_sequence_parallel=self.parallel_config.enable_sequence_parallel):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
                 kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
+                enable_sequence_parallel=self.parallel_config.enable_sequence_parallel
             )
         selected_token_ids = self.model.sample_from_hidden(
             hidden_states, tpu_sampling_metadata)
@@ -756,11 +759,13 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        with set_forward_context(attn_metadata, self.vllm_config, 0):
+        with set_forward_context(attn_metadata, self.vllm_config, 0,
+                                 enable_sequence_parallel=self.parallel_config.enable_sequence_parallel):
             self.model(input_ids=input_ids,
                        positions=position_ids,
                        kv_caches=kv_caches,
-                       inputs_embeds=inputs_embeds)
+                       inputs_embeds=inputs_embeds,
+                       enable_sequence_parallel=self.parallel_config.enable_sequence_parallel)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -876,6 +881,7 @@ class ModelWrapperV1(nn.Module):
         positions: torch.Tensor,
         kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
         inputs_embeds: Optional[torch.Tensor] = None,
+        enable_sequence_parallel: bool = None
     ) -> torch.Tensor:
         """Executes the forward pass of the model.
 
@@ -893,6 +899,8 @@ class ModelWrapperV1(nn.Module):
             positions=positions,
             inputs_embeds=inputs_embeds,
         )
+        if enable_sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
 
         return hidden_states
 

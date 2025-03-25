@@ -60,11 +60,11 @@ class LogitsProcessor(nn.Module):
         sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        forward_context = try_get_forward_context()
-        if (forward_context is not None
-                and forward_context.enable_sequence_parallel):
-            hidden_states = tensor_model_parallel_all_gather(hidden_states,
-                                                             dim=0)
+        # forward_context = try_get_forward_context()
+        # if (forward_context is not None
+        #         and forward_context.enable_sequence_parallel):
+        #     hidden_states = tensor_model_parallel_all_gather(hidden_states,
+        #                                                      dim=0)
         if self.logits_as_input:
             logits = hidden_states
         else:

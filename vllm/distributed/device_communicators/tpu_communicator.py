@@ -84,5 +84,8 @@ class TpuCommunicator(DeviceCommunicatorBase):
         return xm.all_reduce(xm.REDUCE_SUM, input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        assert dim == -1, "TPUs only support dim=-1 for all-gather."
         return xm.all_gather(input_, dim=dim)
+    
+    def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        return xm.reduce_scatter(xm.REDUCE_SUM, input_, scale=1.0, scatter_dim=dim, 
+                                 shard_count=self.world_size)
