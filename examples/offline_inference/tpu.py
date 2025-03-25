@@ -34,3 +34,16 @@ for output, answer in zip(outputs, answers):
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     # assert generated_text.startswith(answer)
+
+
+# 2025.03.24
+# succeeded with following command and some modification on xla_model.py
+# VLLM_USE_V1=1 python examples/offline_inference/tpu.py
+# remove xla_model's all_gather use all_reduce
+# _all_gather_using_all_reduce does not support list of tensors as input
+# if pin_layout and output == None and isinstance(value, torch.Tensor):
+#   # There is not an easy way to pin the all_gather layout, so use all_reduce
+#   # based all_gather for this purpose.
+#   return _all_gather_using_all_reduce(
+#       value, dim=dim, groups=groups, pin_layout=True)
+

@@ -80,12 +80,16 @@ class TpuCommunicator(DeviceCommunicatorBase):
         pjrt.initialize_multiprocess(local_rank, local_world_size)
         xr._init_world_size_ordinal()
 
+        self.groups = [[i for i in range(global_world_size)]]
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         return xm.all_reduce(xm.REDUCE_SUM, input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        return xm.all_gather(input_, dim=dim)
+        return xm.all_gather(input_, dim=dim, groups=self.groups, pin_layout=True,
+                             channel_id=1, use_global_device_ids=True)
     
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         return xm.reduce_scatter(xm.REDUCE_SUM, input_, scale=1.0, scatter_dim=dim, 
-                                 shard_count=self.world_size)
+                                 shard_count=self.world_size, groups=self.groups,
+                                 pin_layout=True, channel_id=2, use_global_device_ids=True)
