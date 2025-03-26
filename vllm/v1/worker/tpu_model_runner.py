@@ -89,7 +89,7 @@ class TPUModelRunner:
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = scheduler_config.max_num_seqs
+        self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
@@ -173,7 +173,7 @@ class TPUModelRunner:
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
         self.num_tokens_paddings = _get_paddings(
-            min_token_size=16,
+            min_token_size=512,
             max_token_size=self.max_num_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
 
@@ -605,6 +605,8 @@ class TPUModelRunner:
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config,
                                  enable_sequence_parallel=self.parallel_config.enable_sequence_parallel):
+            from vllm.distributed.device_communicators.tpu_communicator import TpuCommunicator
+            TpuCommunicator.channel_id = 1
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
@@ -706,6 +708,7 @@ class TPUModelRunner:
         model = model.eval()
         xm.mark_step()
         xm.wait_device_ops()
+        # torch.distributed.barrier()
         model = ModelWrapperV1(model)
         self.model = torch.compile(model,
                                    backend="openxla",
@@ -763,6 +766,8 @@ class TPUModelRunner:
 
         with set_forward_context(attn_metadata, self.vllm_config, 0,
                                  enable_sequence_parallel=self.parallel_config.enable_sequence_parallel):
+            from vllm.distributed.device_communicators.tpu_communicator import TpuCommunicator
+            TpuCommunicator.channel_id = 1
             self.model(input_ids=input_ids,
                        positions=position_ids,
                        kv_caches=kv_caches,
@@ -775,12 +780,17 @@ class TPUModelRunner:
         """Compile the model."""
 
         logger.info("Compiling the model with different input shapes.")
-
+        xm.mark_step()
+        xm.wait_device_ops()
         start = time.perf_counter()
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(self.kv_caches, num_tokens)
             xm.mark_step()
+            xm.wait_device_ops()
+            if num_tokens >= self.max_num_tokens:
+                break
+            num_tokens *= 2
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
