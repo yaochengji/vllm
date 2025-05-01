@@ -748,6 +748,7 @@ class TPUModelRunner:
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
+        logger.info("start execute_model")
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -767,6 +768,7 @@ class TPUModelRunner:
         input_ids, inputs_embeds = self._get_model_inputs(
             self.input_ids, mm_embeds)
         xm.mark_step()
+        logger.info(f"####### inputs_embeds: {inputs_embeds.cpu()[0][0]}")
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         with set_forward_context(
@@ -869,7 +871,8 @@ class TPUModelRunner:
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.
         self._verify_num_xla_graphs("execute_model")
-
+        
+        logger.info("end execute_model")
         return model_runner_output
 
     def load_model(self) -> None:
