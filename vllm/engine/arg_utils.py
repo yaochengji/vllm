@@ -1367,7 +1367,7 @@ class EngineArgs:
                     current_platform.is_cuda()
                     and current_platform.is_device_capability(100)) or (
                         current_platform.device_name
-                        == "hpu"):  # handle hpu also for OOT platform
+                        == "hpu") or current_platform.is_tpu():  # handle hpu also for OOT platform
                 supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (

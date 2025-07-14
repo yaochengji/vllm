@@ -30,11 +30,11 @@ from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
-                        is_pin_memory_available, prev_power_of_2)
+from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available, prev_power_of_2
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata,
-                                               get_page_size_bytes)
+                                               get_page_size_bytes,
+                                               TPU_STR_DTYPE_TO_TORCH_DTYPE)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
@@ -144,7 +144,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             else:
                 self.kv_cache_dtype = model_dtype
         else:
-            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+            self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
         self._hidden_states_dtype = self.dtype
 

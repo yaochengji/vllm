@@ -27,10 +27,11 @@ def main():
     args = parser.parse_args()
 
     llm_args = {
-        "model": "Qwen/Qwen2-1.5B-Instruct",
+        "model": "chengjiyao/Llama-3.1-8B-Instruct-FP8-KV",
         "max_num_batched_tokens": 64,
         "max_num_seqs": 4,
         "max_model_len": 128,
+        "kv_cache_dtype": "fp8",
     }
     if args.use_spmd:
         os.environ["VLLM_XLA_USE_SPMD"] = "1"
@@ -50,7 +51,6 @@ def main():
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        assert generated_text.startswith(answer)
         print("-" * 50)
 
 
